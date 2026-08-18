@@ -10,7 +10,7 @@ import time
 import argparse
 import os
 
-# This folder is used to store alle single ISIN files
+# This folder is used to store all single ISIN files
 OUTPUT_FOLDER = "./stock_details/"
 
 isins = []

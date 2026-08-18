@@ -7,3 +7,7 @@ help:
 fmt: ## Formats everything
 	black .
 
+check: ## Syntax-check Python sources
+	python3 -m py_compile trapi/api.py trapi/__init__.py setup.py
+	python3 -m py_compile examples/*.py LS/convert-stammdaten.py
+

@@ -27,7 +27,7 @@ with open("companyNameIsins.json", "r", encoding="utf-8") as f:
 # Extract decimal number in a string
 def getDecimalFromString(inputString):
     try:
-        numbers = re.findall("[-+]?\d.*\,\d+|\d+", inputString)
+        numbers = re.findall(r"[-+]?\d.*\,\d+|\d+", inputString)
         return numbers[0].replace(".", "").replace(",", ".")
     except:
         return None
@@ -65,9 +65,7 @@ def getIsinFromStockName(stockName):
     return ""
 
 
-# Portfolio Performance transaction types
-# Kauf, Einlage, Verkauf, Zinsen, Gebühren, Dividende, Umbuchung (Eingang), Umbuchung (Ausgang)
-# Buy, Deposit, Sell, Interest, Fees, Dividends, Transfer (Inbound), Transfer (Outbound)
+# Portfolio Performance types (DE / EN): Buy, Deposit, Sell, Interest, Fees, Dividend, Transfer in/out
 
 missingIsins = {}
 
@@ -178,13 +176,13 @@ with open("myTransactions.csv", "w") as f:
         ):
             isin = getIsinFromStockName(title)
             taxRate = 0.2782
-            profit = abs(float(re.findall("[-+]?\d.*\.\d+|\d+", body)[1].replace(",", "")) / 100) #as decimal (percentage)
+            profit = abs(float(re.findall(r"[-+]?\d.*\.\d+|\d+", body)[1].replace(",", "")) / 100)  # decimal percentage
             amountPerShare = abs(float(getDecimalFromString(body)))
             cashChangeAmount = abs(event["cashChangeAmount"])
             buy = (cashChangeAmount + 1) / (1 + profit - profit * taxRate)
             sell = buy * (1 + profit)
             taxes = sell * taxRate
-            if len(isin) > 4: #round to account for errors while calculating taxes
+            if len(isin) > 4:  # round to account for errors while calculating taxes
                 shares = "{0:.4f}".format(cashChangeAmount / amountPerShare)
             else:
                 shares = "{0:.4f}".format(sell / amountPerShare)
