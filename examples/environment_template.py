@@ -8,5 +8,8 @@ PIN = ""
 LOCALE = "en"
 CURRENCY = "EUR"
 
+# Optional: path to the paired device PEM key (default: ./key)
+# KEY_FILE = os.environ.get("TR_KEY_FILE", "key")
+
 if not PIN:
     PIN = getpass.getpass("Pin:")

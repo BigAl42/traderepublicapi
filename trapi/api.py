@@ -28,10 +28,11 @@ class TRapiExcServerUnknownState(TRapiException):
 class TRApi:
     url = "https://api.traderepublic.com"
 
-    def __init__(self, number, pin, locale='en'):
+    def __init__(self, number, pin, locale='en', key_file=None):
         self.number = number
         self.pin = pin
         self.locale = locale
+        self.key_file = key_file or os.environ.get("TR_KEY_FILE", "key")
         self.signing_key = None
         self.ws = None
         self.sessionToken = None
@@ -62,7 +63,7 @@ class TRApi:
                 bFailed = True
 
             if bFailed:
-                raise Exception(f"Cannot Login! Details: {r.text}")
+                raise TRapiException(f"Cannot Login! Details: {r.text}")
             else:
                 print(f"*** The process id is: {processId}")
 
@@ -79,17 +80,16 @@ class TRApi:
 
         if r.status_code == 200:
             key = self.signing_key.to_pem()
-            with open("key", "wb") as f:
+            with open(self.key_file, "wb") as f:
                 f.write(key)
 
             return key
-        else:
-            print("no")
+        raise TRapiException(f"Device registration failed: {r.status_code} {r.text}")
 
     def login(self, **kwargs):
 
         res = None
-        if os.path.isfile("key"):
+        if os.path.isfile(self.key_file):
             res = self.do_request(
                 "/api/v1/auth/login",
                 payload={"phoneNumber": self.number, "pin": self.pin},
@@ -143,7 +143,7 @@ class TRApi:
     def do_request(self, path, payload):
 
         if self.signing_key is None:
-            with open("key", "rb") as f:
+            with open(self.key_file, "rb") as f:
                 self.signing_key = SigningKey.from_pem(
                     f.read(), hashfunc=hashlib.sha512
                 )
@@ -174,6 +174,7 @@ class TRApi:
 
     exchange_list = ["LSX", "TDG", "LUS", "TUB", "BHS", "B2C"]
     range_list = ["1d", "5d", "1m", "3m", "1y", "max"]
+    product_category_list = ["vanillaWarrant", "knockOutProduct", "factor"]
     instrument_list = ["stock", "fund", "derivative", "crypto"]
     jurisdiction_list = ["AT", "DE", "ES", "FR", "IT", "NL", "BE", "EE", "FI", "IE", "GR", "LU", "LT",
                          "LV", "PT", "SI", "SK"]
@@ -227,7 +228,19 @@ class TRApi:
         """availableCashForPayout request"""
         await self.sub("availableCashForPayout", callback)
 
-    # todo availableSize
+    async def available_size(self, isin, exchange="LSX", callback=print):
+        """availableSize request — how many units can be bought/sold at the exchange."""
+        if exchange not in self.exchange_list:
+            raise TRapiException(f"exchange must be either one of {self.exchange_list}")
+        return await self.sub(
+            "availableSize",
+            payload={
+                "type": "availableSize",
+                "parameters": {"exchangeId": exchange, "instrumentId": isin},
+            },
+            callback=callback,
+            key=f"availableSize {isin} {exchange}",
+        )
 
     async def cancel_order(self, id, callback=print):
         """cancelOrder request"""
@@ -238,7 +251,14 @@ class TRApi:
             key=f"cancelOrder {id}"
         )
 
-    # todo cancelPriceAlarm
+    async def cancel_price_alarm(self, id, callback=print):
+        """cancelPriceAlarm request"""
+        return await self.sub(
+            "cancelPriceAlarm",
+            payload={"type": "cancelPriceAlarm", "id": id},
+            callback=callback,
+            key=f"cancelPriceAlarm {id}",
+        )
 
     async def cancel_savings_plan(self, id, callback=print):
         """cancelSavingsPlan request"""
@@ -268,7 +288,7 @@ class TRApi:
         return await self.sub(
             "changeSavingsPlan",
             payload={
-                "type": "createSavingsPlan",
+                "type": "changeSavingsPlan",
                 "id": id,
                 "parameters": params,
                 "warningsShown": warnings_shown,
@@ -280,8 +300,24 @@ class TRApi:
     # todo collection
 
     async def compact_portfolio(self, callback=print):
-        """compactPortfolio request"""
+        """compactPortfolio request (legacy). Prefer compact_portfolio_by_type."""
         await self.sub("compactPortfolio", callback)
+
+    async def compact_portfolio_by_type(self, sec_acc_no=None, callback=print):
+        """compactPortfolioByType request — current TR web portfolio endpoint (2026)."""
+        payload = {"type": "compactPortfolioByType"}
+        if sec_acc_no:
+            payload["secAccNo"] = sec_acc_no
+        return await self.sub(
+            "compactPortfolioByType",
+            payload=payload,
+            callback=callback,
+            key=f"compactPortfolioByType {sec_acc_no}",
+        )
+
+    async def account_pairs(self, callback=print):
+        """accountPairs request — securities/cash account numbers including tax wrappers."""
+        return await self.sub("accountPairs", callback)
 
     # todo  confirmOrder
 
@@ -319,10 +355,32 @@ class TRApi:
             key=f"createSavingsPlan {params} {warnings_shown}"
         )
 
-    # todo cryptoDetails
-    # todo etfComposition
-    # todo etfDetails
-    # todo  followWatchlist
+    async def crypto_details(self, isin, callback=print):
+        """cryptoDetails request"""
+        return await self.sub(
+            "cryptoDetails",
+            payload={"type": "cryptoDetails", "id": isin},
+            callback=callback,
+            key=f"cryptoDetails {isin}",
+        )
+
+    async def etf_composition(self, isin, callback=print):
+        """etfComposition request"""
+        return await self.sub(
+            "etfComposition",
+            payload={"type": "etfComposition", "id": isin},
+            callback=callback,
+            key=f"etfComposition {isin}",
+        )
+
+    async def etf_details(self, isin, callback=print):
+        """etfDetails request"""
+        return await self.sub(
+            "etfDetails",
+            payload={"type": "etfDetails", "id": isin},
+            callback=callback,
+            key=f"etfDetails {isin}",
+        )
 
     async def frontend_experiment(self, operation, experimentId, identifier, callback=print):
         """frontendExperiment request"""
@@ -391,8 +449,11 @@ class TRApi:
         await self.sub("neonCards", callback)
 
     async def derivatives(self, isin, product_category, callback=print):
-        # todo: create list for product_category
         """derivatives request"""
+        if product_category not in self.product_category_list:
+            raise TRapiException(
+                f"product_category must be either one of {self.product_category_list}"
+            )
         return await self.sub(
             "derivatives",
             payload={"type": "derivatives", "underlying": isin, "productCategory": product_category},
@@ -404,9 +465,10 @@ class TRApi:
                           callback=print):
         """neonSearch request
 
-        No login required
-#todo params
-        :return: list of instruments"""
+        No login required.
+
+        :return: list of instruments
+        """
 
         if instrument_type not in self.instrument_list:
             raise TRapiException(f"type must be either one of {self.instrument_list}")
@@ -493,7 +555,9 @@ class TRApi:
             key=f"news {isin}"
         )
 
-    # todo newsSubscriptions
+    async def news_subscriptions(self, callback=print):
+        """newsSubscriptions request"""
+        return await self.sub("newsSubscriptions", callback)
 
     async def orders(self, terminated=False, callback=print):
         """orders request"""
@@ -503,7 +567,16 @@ class TRApi:
             payload={"type": "orders", "terminated": terminated},
             key=f"orders {terminated}")
 
-    # todo  performance
+    async def performance(self, isin, exchange="LSX", callback=print):
+        """performance request"""
+        if exchange not in self.exchange_list:
+            raise TRapiException(f"exchange must be either one of {self.exchange_list}")
+        return await self.sub(
+            "performance",
+            payload={"type": "performance", "id": f"{isin}.{exchange}"},
+            callback=callback,
+            key=f"performance {isin} {exchange}",
+        )
 
     async def portfolio(self, callback=print):
         """portfolio"""
@@ -520,7 +593,16 @@ class TRApi:
             key=f"portfolioAggregateHistory {range}",
         )
 
-    # todo portfolioAggregateHistoryLight
+    async def portfolio_aggregate_history_light(self, range="max", callback=print):
+        """portfolioAggregateHistoryLight request"""
+        if range not in self.range_list:
+            raise TRapiException(f"Range of time must be either one of {self.range_list}")
+        return await self.sub(
+            "portfolioAggregateHistoryLight",
+            payload={"type": "portfolioAggregateHistoryLight", "range": range},
+            callback=callback,
+            key=f"portfolioAggregateHistoryLight {range}",
+        )
     async def portfolio_status(self, callback=print):
         """portfolioStatus request"""
         return await self.sub("portfolioStatus", callback)
@@ -529,18 +611,49 @@ class TRApi:
         """priceAlarms request"""
         return await self.sub("priceAlarms", callback)
 
-    # todo priceForOrder
+    async def price_for_order(self, isin, exchange="LSX", order_type="buy", callback=print):
+        """priceForOrder request"""
+        if exchange not in self.exchange_list:
+            raise TRapiException(f"exchange must be either one of {self.exchange_list}")
+        if order_type not in self.order_type_list:
+            raise TRapiException(f"order_Type must be either of {self.order_type_list}")
+        return await self.sub(
+            "priceForOrder",
+            payload={
+                "type": "priceForOrder",
+                "parameters": {
+                    "exchangeId": exchange,
+                    "instrumentId": isin,
+                    "type": order_type,
+                },
+            },
+            callback=callback,
+            key=f"priceForOrder {isin} {exchange} {order_type}",
+        )
     async def remove_from_watchlist(self, instrument_id, callback=print):
         """removeFromWatchlist request"""
         return await self.sub(
-            "orders",
+            "removeFromWatchlist",
             callback=callback,
             payload={"type": "removeFromWatchlist", "instrumentId": instrument_id},
             key=f"removeFromWatchlist {instrument_id}")
 
-    # todo savingsPlanParameters
-    # todo  savingsPlans
-    # todo  settings
+    async def savings_plan_parameters(self, isin, callback=print):
+        """savingsPlanParameters request"""
+        return await self.sub(
+            "savingsPlanParameters",
+            payload={"type": "savingsPlanParameters", "instrumentId": isin},
+            callback=callback,
+            key=f"savingsPlanParameters {isin}",
+        )
+
+    async def savings_plans(self, callback=print):
+        """savingsPlans request"""
+        return await self.sub("savingsPlans", callback)
+
+    async def settings(self, callback=print):
+        """settings request"""
+        return await self.sub("settings", callback)
 
     async def simple_create_order(
             self,
@@ -635,8 +748,6 @@ class TRApi:
             key=f"stockDetails {isin}",
         )
 
-    # todo subscribeNews
-
     async def ticker(self, isin, exchange="LSX", callback=print):
         """ticker request"""
 
@@ -663,6 +774,24 @@ class TRApi:
         """timelineActions request"""
         return await self.sub("timelineActions", callback)
 
+    async def timeline_transactions(self, after=None, callback=print):
+        """timelineTransactions request — cash-relevant timeline subset."""
+        return await self.sub(
+            "timelineTransactions",
+            payload={"type": "timelineTransactions", "after": after},
+            callback=callback,
+            key=f"timelineTransactions {after}",
+        )
+
+    async def timeline_activity_log(self, after=None, callback=print):
+        """timelineActivityLog request"""
+        return await self.sub(
+            "timelineActivityLog",
+            payload={"type": "timelineActivityLog", "after": after},
+            callback=callback,
+            key=f"timelineActivityLog {after}",
+        )
+
     async def timeline_detail(self, id, callback=print):
         """timelineDetail request"""
         return await self.sub(
@@ -672,9 +801,33 @@ class TRApi:
             key=f"timelineDetail {id}",
         )
 
-    #  todo tradingPerkConditionStatus
-    #  todo unfollowWatchlist
-    #  todo unsubscribeNews
+    async def timeline_detail_v2(self, id, callback=print):
+        """timelineDetailV2 request — current detail payload used by the TR app."""
+        return await self.sub(
+            "timelineDetailV2",
+            payload={"type": "timelineDetailV2", "id": id},
+            callback=callback,
+            key=f"timelineDetailV2 {id}",
+        )
+
+    async def subscribe_news(self, isin, callback=print):
+        """subscribeNews request"""
+        return await self.sub(
+            "subscribeNews",
+            payload={"type": "subscribeNews", "instrumentId": isin},
+            callback=callback,
+            key=f"subscribeNews {isin}",
+        )
+
+    async def unsubscribe_news(self, isin, callback=print):
+        """unsubscribeNews request"""
+        return await self.sub(
+            "unsubscribeNews",
+            payload={"type": "unsubscribeNews", "instrumentId": isin},
+            callback=callback,
+            key=f"unsubscribeNews {isin}",
+        )
+
     async def watchlist(self, callback=print):
         """watchlist request"""
         return await self.sub("watchlist", callback)
@@ -866,9 +1019,12 @@ class TRApi:
 
 
 class TrBlockingApi(TRApi):
-    def __init__(self, number, pin, timeout=20.0, locale="en"):
+    def __init__(self, number, pin, timeout=20.0, locale="en", key_file=None):
         self.timeout = timeout
-        super().__init__(number, pin, locale)
+        super().__init__(number, pin, locale, key_file=key_file)
+
+    def _run(self, coro):
+        return asyncio.get_event_loop().run_until_complete(self.get_one(coro))
 
     async def get_one(self, f):
         await f
@@ -964,6 +1120,54 @@ class TrBlockingApi(TRApi):
             self.get_one(super().timeline_detail(id=id))
         )
 
+    def account_pairs(self):
+        return self._run(super().account_pairs())
+
+    def compact_portfolio(self):
+        return self._run(super().compact_portfolio())
+
+    def compact_portfolio_by_type(self, sec_acc_no=None):
+        return self._run(super().compact_portfolio_by_type(sec_acc_no=sec_acc_no))
+
+    def crypto_details(self, isin):
+        return self._run(super().crypto_details(isin))
+
+    def etf_details(self, isin):
+        return self._run(super().etf_details(isin))
+
+    def etf_composition(self, isin):
+        return self._run(super().etf_composition(isin))
+
+    def news_subscriptions(self):
+        return self._run(super().news_subscriptions())
+
+    def performance(self, isin, exchange="LSX"):
+        return self._run(super().performance(isin, exchange=exchange))
+
+    def portfolio_status(self):
+        return self._run(super().portfolio_status())
+
+    def price_alarms(self):
+        return self._run(super().price_alarms())
+
+    def savings_plans(self):
+        return self._run(super().savings_plans())
+
+    def settings(self):
+        return self._run(super().settings())
+
+    def timeline_transactions(self, after=None):
+        return self._run(super().timeline_transactions(after=after))
+
+    def timeline_activity_log(self, after=None):
+        return self._run(super().timeline_activity_log(after=after))
+
+    def timeline_detail_v2(self, id):
+        return self._run(super().timeline_detail_v2(id))
+
+    def watchlist(self):
+        return self._run(super().watchlist())
+
     # -----------------------------------------------------------
     # old names of functions
 
@@ -977,7 +1181,7 @@ class TrBlockingApi(TRApi):
 
     @deprecated(reason="Use function orders")
     def curr_orders(self):
-        self.orders()
+        return self.orders()
 
     @deprecated(reason="Use function portfolio_aggregate_history")
     def port_hist(self, range="max"):
@@ -991,6 +1195,6 @@ class TrBlockingApi(TRApi):
     def stock_history(self, isin, range="max"):
         return self.aggregate_history_light(isin, range=range)
 
-    @deprecated(reason="Use function neon_news")
+    @deprecated(reason="Use function timeline_detail")
     def hist_event(self, id):
         return self.timeline_detail(id)
