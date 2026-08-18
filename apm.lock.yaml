@@ -1,0 +1,245 @@
+lockfile_version: '1'
+generated_at: '2026-08-18T12:14:49.338013+00:00'
+apm_version: 0.28.0
+dependencies:
+- repo_url: bigal42/development-harness
+  materialization_repo_url: BigAl42/development-harness
+  name: development-harness
+  host: github.com
+  resolved_commit: eadb1acceb3853df9f1309fc529fba5f5fa9f29a
+  resolved_ref: v0.6.0
+  version: 0.6.0
+  package_type: apm_package
+  deployed_files:
+  - .agents/skills/authoring-design-md
+  - .agents/skills/authoring-design-md/SKILL.md
+  - .agents/skills/harness-rules
+  - .agents/skills/harness-rules/SKILL.md
+  - .agents/skills/integrating-development-harness
+  - .agents/skills/integrating-development-harness/SKILL.md
+  - .cursor/rules/coding-principles.mdc
+  - .cursor/rules/communication.mdc
+  - .cursor/rules/consumer-integration.mdc
+  - .cursor/rules/context-reasoning.mdc
+  - .cursor/rules/design-md-application.mdc
+  - .cursor/rules/design-md.mdc
+  - .cursor/rules/domain-logic-first.mdc
+  - .cursor/rules/english-language.mdc
+  - .cursor/rules/instruction-following.mdc
+  - .cursor/rules/mobile-web-shell.mdc
+  - .cursor/rules/okf-knowledge-workflow.mdc
+  - .cursor/rules/okf-v0.2-application.mdc
+  - .cursor/rules/quality-gates.mdc
+  - .cursor/rules/sharing-privacy.mdc
+  - .cursor/rules/web-push-privacy.mdc
+  deployed_file_hashes:
+    .agents/skills/authoring-design-md/SKILL.md: sha256:e6f555d2ecc034c6b4b66ab2e59f30006370cc1b7bdd3a72202387ef6dae531d
+    .agents/skills/harness-rules/SKILL.md: sha256:8d663639c8678d28209a0493257d1870a7b2d7e2d4af2dc3295b695773527473
+    .agents/skills/integrating-development-harness/SKILL.md: sha256:01bf2b0ce455138ac9ce3c9546abeecead97f620861ad1479508c4fd13b7d834
+    .cursor/rules/coding-principles.mdc: sha256:aab4366e95e455f1613406a3ea8a473d8d8a766ed7dbf5c55043b3262976401b
+    .cursor/rules/communication.mdc: sha256:74918c491fb7821835eaa6564bf858c05a5b1b72564e3c03ce0080c5ea84aed2
+    .cursor/rules/consumer-integration.mdc: sha256:0cd5b55d6963c929473933f890a3637f3e9549a91f069439fe39bd8d103b61f7
+    .cursor/rules/context-reasoning.mdc: sha256:046ff66aee22e08591b40af154fc9b624517dde962339cda3355e021b2bb6cf0
+    .cursor/rules/design-md-application.mdc: sha256:86f7d34df2f1445b17f71c17835800bc498be4cd3cbf6df198e9f82cd9c3e72a
+    .cursor/rules/design-md.mdc: sha256:70d88521efb6907add7f3051472d9beda3c34df82aaa4fec49c85d25339a4014
+    .cursor/rules/domain-logic-first.mdc: sha256:08a8f70f92935cbdedaafed20c5f17c926ac21dae763ce292738a445a8f66785
+    .cursor/rules/english-language.mdc: sha256:bac917f3fe53afdfed56004a4d288f732cb5a1b448c62c240c40fdb6850a1391
+    .cursor/rules/instruction-following.mdc: sha256:0e0d655befbb86708ebda03ddd45cec50b63f7478ce49f06fb29a03327ed3771
+    .cursor/rules/mobile-web-shell.mdc: sha256:4d6fdb26471e310990af1c2ef1215fc47a7a32004838fd83334bde31bb90c4cc
+    .cursor/rules/okf-knowledge-workflow.mdc: sha256:2d10e17a88bd33e2896568b1427d07735439388c85aad3bc0606960dc0edd6a0
+    .cursor/rules/okf-v0.2-application.mdc: sha256:94f1013ee048ebd4a4014be0523233ede2cda132f60e1ccfb166ea69fb74959e
+    .cursor/rules/quality-gates.mdc: sha256:6f0507a05a27961ce36401d69218140a1919777056c5ea186c160c7a262be6a1
+    .cursor/rules/sharing-privacy.mdc: sha256:82219e294a6d6a0ebda189e32845547f7f9271c68dd10b16a32a0d1135b01aa1
+    .cursor/rules/web-push-privacy.mdc: sha256:5f5bf7f4b85a22d68b05087349cb97bce33db5d91db421992a75f1098f22d269
+  content_hash: sha256:ad483c83e14fd7dfb052084f91fcffd2ddb71ff17ea2b9c0a2712c7438f6b911
+  declared_license: MIT
+deployments:
+- kind: project-relative
+  target: cursor
+  value: .agents/skills/authoring-design-md
+  runtime: null
+  scope: project
+  owners:
+  - bigal42/development-harness
+  active_owner: bigal42/development-harness
+  content_hash: null
+- kind: project-relative
+  target: cursor
+  value: .agents/skills/authoring-design-md/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - bigal42/development-harness
+  active_owner: bigal42/development-harness
+  content_hash: sha256:e6f555d2ecc034c6b4b66ab2e59f30006370cc1b7bdd3a72202387ef6dae531d
+- kind: project-relative
+  target: cursor
+  value: .agents/skills/harness-rules
+  runtime: null
+  scope: project
+  owners:
+  - bigal42/development-harness
+  active_owner: bigal42/development-harness
+  content_hash: null
+- kind: project-relative
+  target: cursor
+  value: .agents/skills/harness-rules/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - bigal42/development-harness
+  active_owner: bigal42/development-harness
+  content_hash: sha256:8d663639c8678d28209a0493257d1870a7b2d7e2d4af2dc3295b695773527473
+- kind: project-relative
+  target: cursor
+  value: .agents/skills/integrating-development-harness
+  runtime: null
+  scope: project
+  owners:
+  - bigal42/development-harness
+  active_owner: bigal42/development-harness
+  content_hash: null
+- kind: project-relative
+  target: cursor
+  value: .agents/skills/integrating-development-harness/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - bigal42/development-harness
+  active_owner: bigal42/development-harness
+  content_hash: sha256:01bf2b0ce455138ac9ce3c9546abeecead97f620861ad1479508c4fd13b7d834
+- kind: project-relative
+  target: cursor
+  value: .cursor/rules/coding-principles.mdc
+  runtime: null
+  scope: project
+  owners:
+  - bigal42/development-harness
+  active_owner: bigal42/development-harness
+  content_hash: sha256:aab4366e95e455f1613406a3ea8a473d8d8a766ed7dbf5c55043b3262976401b
+- kind: project-relative
+  target: cursor
+  value: .cursor/rules/communication.mdc
+  runtime: null
+  scope: project
+  owners:
+  - bigal42/development-harness
+  active_owner: bigal42/development-harness
+  content_hash: sha256:74918c491fb7821835eaa6564bf858c05a5b1b72564e3c03ce0080c5ea84aed2
+- kind: project-relative
+  target: cursor
+  value: .cursor/rules/consumer-integration.mdc
+  runtime: null
+  scope: project
+  owners:
+  - bigal42/development-harness
+  active_owner: bigal42/development-harness
+  content_hash: sha256:0cd5b55d6963c929473933f890a3637f3e9549a91f069439fe39bd8d103b61f7
+- kind: project-relative
+  target: cursor
+  value: .cursor/rules/context-reasoning.mdc
+  runtime: null
+  scope: project
+  owners:
+  - bigal42/development-harness
+  active_owner: bigal42/development-harness
+  content_hash: sha256:046ff66aee22e08591b40af154fc9b624517dde962339cda3355e021b2bb6cf0
+- kind: project-relative
+  target: cursor
+  value: .cursor/rules/design-md-application.mdc
+  runtime: null
+  scope: project
+  owners:
+  - bigal42/development-harness
+  active_owner: bigal42/development-harness
+  content_hash: sha256:86f7d34df2f1445b17f71c17835800bc498be4cd3cbf6df198e9f82cd9c3e72a
+- kind: project-relative
+  target: cursor
+  value: .cursor/rules/design-md.mdc
+  runtime: null
+  scope: project
+  owners:
+  - bigal42/development-harness
+  active_owner: bigal42/development-harness
+  content_hash: sha256:70d88521efb6907add7f3051472d9beda3c34df82aaa4fec49c85d25339a4014
+- kind: project-relative
+  target: cursor
+  value: .cursor/rules/domain-logic-first.mdc
+  runtime: null
+  scope: project
+  owners:
+  - bigal42/development-harness
+  active_owner: bigal42/development-harness
+  content_hash: sha256:08a8f70f92935cbdedaafed20c5f17c926ac21dae763ce292738a445a8f66785
+- kind: project-relative
+  target: cursor
+  value: .cursor/rules/english-language.mdc
+  runtime: null
+  scope: project
+  owners:
+  - bigal42/development-harness
+  active_owner: bigal42/development-harness
+  content_hash: sha256:bac917f3fe53afdfed56004a4d288f732cb5a1b448c62c240c40fdb6850a1391
+- kind: project-relative
+  target: cursor
+  value: .cursor/rules/instruction-following.mdc
+  runtime: null
+  scope: project
+  owners:
+  - bigal42/development-harness
+  active_owner: bigal42/development-harness
+  content_hash: sha256:0e0d655befbb86708ebda03ddd45cec50b63f7478ce49f06fb29a03327ed3771
+- kind: project-relative
+  target: cursor
+  value: .cursor/rules/mobile-web-shell.mdc
+  runtime: null
+  scope: project
+  owners:
+  - bigal42/development-harness
+  active_owner: bigal42/development-harness
+  content_hash: sha256:4d6fdb26471e310990af1c2ef1215fc47a7a32004838fd83334bde31bb90c4cc
+- kind: project-relative
+  target: cursor
+  value: .cursor/rules/okf-knowledge-workflow.mdc
+  runtime: null
+  scope: project
+  owners:
+  - bigal42/development-harness
+  active_owner: bigal42/development-harness
+  content_hash: sha256:2d10e17a88bd33e2896568b1427d07735439388c85aad3bc0606960dc0edd6a0
+- kind: project-relative
+  target: cursor
+  value: .cursor/rules/okf-v0.2-application.mdc
+  runtime: null
+  scope: project
+  owners:
+  - bigal42/development-harness
+  active_owner: bigal42/development-harness
+  content_hash: sha256:94f1013ee048ebd4a4014be0523233ede2cda132f60e1ccfb166ea69fb74959e
+- kind: project-relative
+  target: cursor
+  value: .cursor/rules/quality-gates.mdc
+  runtime: null
+  scope: project
+  owners:
+  - bigal42/development-harness
+  active_owner: bigal42/development-harness
+  content_hash: sha256:6f0507a05a27961ce36401d69218140a1919777056c5ea186c160c7a262be6a1
+- kind: project-relative
+  target: cursor
+  value: .cursor/rules/sharing-privacy.mdc
+  runtime: null
+  scope: project
+  owners:
+  - bigal42/development-harness
+  active_owner: bigal42/development-harness
+  content_hash: sha256:82219e294a6d6a0ebda189e32845547f7f9271c68dd10b16a32a0d1135b01aa1
+- kind: project-relative
+  target: cursor
+  value: .cursor/rules/web-push-privacy.mdc
+  runtime: null
+  scope: project
+  owners:
+  - bigal42/development-harness
+  active_owner: bigal42/development-harness
+  content_hash: sha256:5f5bf7f4b85a22d68b05087349cb97bce33db5d91db421992a75f1098f22d269

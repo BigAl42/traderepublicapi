@@ -87,3 +87,14 @@ _docDownloads/
 _storedOutputs/_bckp/
 .idea/misc.xml
 .idea/trRep3.iml
+
+
+# APM dependencies
+apm_modules/
+
+# Generated harness targets (regenerate with: apm install && apm compile)
+.cursor/rules/
+.cursor/agents/
+.agents/skills/
+.agents/rules/
+AGENTS.md
