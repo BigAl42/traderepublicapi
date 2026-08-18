@@ -3,6 +3,8 @@ trapi/key
 trapi/playground.py
 trapi/.venv
 key
+tr_cookies.txt
+*.cookies.txt
 
 # Python
 __pycache__

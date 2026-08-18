@@ -16,12 +16,16 @@ docs/API.md           this file
 
 `TRApi` talks to two channels:
 
-1. **REST** `https://api.traderepublic.com` — device pairing and signed login (`/api/v1/auth/...`)
-2. **WebSocket** `wss://api.traderepublic.com` — `connect 21 {locale}` then `sub <id> {json}`
+1. **REST** `https://api.traderepublic.com` — **web login v2** (`/api/v2/auth/web/login`) by default
+2. **WebSocket** `wss://api.traderepublic.com` — `connect 31` (web trading) then `sub <id> {json}`
 
 Subscription replies use states `A` (snapshot), `D` (delta via `decode_updates`), `C` (complete), `E` (error).
 
-Auth uses a P-256 device key stored as PEM. Default path is `key` in the working directory, override with `key_file=` or `TR_KEY_FILE`. Trade Republic allows **one paired device**. Pairing this library logs the mobile app out until you pair the phone again.
+Default `auth="web"` matches `app.traderepublic.com`: phone + PIN, then confirm the push in the mobile app (or an authenticator code). The phone app **stays logged in**. Session cookies are saved to `tr_cookies.txt` (`TR_COOKIES_FILE`).
+
+Legacy `auth="device"` is the old ECDSA `/api/v1/auth/login` path (`connect 21`). Trade Republic currently answers `CLIENT_VERSION_OUTDATED` / `failed 34` on that path.
+
+Set `TR_APP_VERSION` if login starts failing with a version error. Current default is `2.2631.13` (`web-pro`).
 
 ## What works today
 
@@ -86,19 +90,16 @@ Example scripts download PDFs from timeline detail `documents` sections (`exampl
 
 ## What is missing or incomplete
 
-Compared with the current Trade Republic app / [pytr](https://github.com/pytr-org/pytr):
+Compared with [pytr](https://github.com/pytr-org/pytr):
 
-- **Web login v2** (push confirm / authenticator) and **AWS WAF** tokens used by `app.traderepublic.com`. This client only implements signed **v1 device-reset** login.
-- **`connect 21` vs web `connect 31`**. Some topics (notably `compactPortfolio`) now fail on web sessions; use `compact_portfolio_by_type` with `secAccNo`.
-- REST helpers that pytr has: signed `/api/v2/auth/account`, cost transparency, payout confirm.
-- Order flow extras: `confirmOrder`, `changeOrder`, `collection`, `accruedInterestTermsRequired`.
-- Watchlist extras: named/follow/unfollow/investable lists.
-- CSV export does not cover interest, card payments, saveback, tax refunds, or reinvested dividends. `timelineDetailV2` is not used by the converters yet.
-- First login is interactive (`input()` for SMS/app code) and historically flaky on the first attempt.
-- No token refresh helper; session expiry means `login()` again.
+- No AWS WAF / Playwright path for **v1 web login**. This client uses **v2** (no WAF).
+- REST cost transparency and payout confirm.
+- Order extras: `confirmOrder`, `changeOrder`, `collection`.
+- Watchlist extras: named/follow/unfollow lists.
+- CSV export does not cover interest, card payments, saveback, tax refunds, or reinvested dividends. Converters still expect German timeline text.
 - `asyncio.get_event_loop()` in `TrBlockingApi` is the old pattern (works, noisy on Python 3.10+).
 
-Treat trading methods as experimental. There is no dry-run or order confirmation UI.
+Treat trading methods as experimental. There is no dry-run.
 
 ## How to test
 
@@ -110,26 +111,24 @@ make check
 make test
 ```
 
-These cover protocol deltas (`decode_updates`), argument validation, and the public method surface. They never call Trade Republic.
+These cover protocol deltas, argument validation, public method surface, v2 header shape, and an unauthenticated `connect 31` search-tags call.
 
 ### Live read-only (real account)
 
 Needed:
 
 1. Phone number and PIN (`TR_PHONE`, `TR_PIN`).
-2. A paired device PEM key (`TR_KEY_FILE`, default `key`). First run prints a process id and asks for the 4-digit code; **this unpairs the phone app**.
-3. Locale if you rely on German timeline strings (`TR_LOCALE=de`). Several example converters only parse DE event text.
-4. Opt-in flag so live tests cannot run by accident: `TR_LIVE_TESTS=1`.
+2. Confirm the **push notification** in the Trade Republic app (or `TR_AUTHENTICATOR_CODE` if the account uses an authenticator).
+3. Locale if you rely on German timeline strings (`TR_LOCALE=de`).
+4. Opt-in: `TR_LIVE_TESTS=1`.
+
+The phone app stays logged in. Cookies go to `tr_cookies.txt`.
 
 ```bash
-export TR_LIVE_TESTS=1 TR_PHONE='+49...' TR_PIN='...' TR_LOCALE=de TR_KEY_FILE=./key
+export TR_LIVE_TESTS=1 TR_PHONE='+49...' TR_PIN='...' TR_LOCALE=de
 python3 -m unittest tests.test_api.LiveReadOnlyTest -v
 ```
 
 Do **not** point live tests at `simple_create_order` / cancel / savings-plan mutate methods.
 
-Cloud Agent / CI: store `TR_PHONE`, `TR_PIN`, and the device key as secrets. Expect 2FA on new environments. Do not commit `key`, `environment.py`, or timeline dumps (already gitignored).
-
-### Manual exporters
-
-See `examples/README.md` and `startMe.sh`. Typical path: login → timeline JSON → details/PDFs → CSV for Portfolio Performance.
+Do not commit `tr_cookies.txt`, `key`, `environment.py`, or timeline dumps.

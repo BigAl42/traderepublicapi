@@ -2,9 +2,9 @@
 
 Unofficial Python client for the Trade Republic private API. Not affiliated with Trade Republic Bank GmbH.
 
-Use it to read cash/portfolio, search instruments, stream quotes, export the timeline, or experiment with orders. **Pairing a device logs the official app out** until you pair the phone again.
+Use it to read cash/portfolio, search instruments, stream quotes, export the timeline, or experiment with orders.
 
-Capability matrix, known gaps, and how to test: [docs/API.md](docs/API.md).
+Login uses the current **web app** flow: phone + PIN, then confirm the push in the Trade Republic app. The official app stays logged in. Capability matrix: [docs/API.md](docs/API.md).
 
 ## Install
 
@@ -12,7 +12,7 @@ Capability matrix, known gaps, and how to test: [docs/API.md](docs/API.md).
 python3 -m pip install -r trapi/requirements.txt
 ```
 
-Device key path defaults to `./key` (gitignored). Override with `TrBlockingApi(..., key_file=...)` or `TR_KEY_FILE`.
+Device key path (`./key`) is only for legacy `auth="device"`. Default web login stores session cookies in `tr_cookies.txt`.
 
 ```bash
 make check   # syntax
@@ -36,7 +36,7 @@ from trapi.api import TrBlockingApi
 
 def main():
     tr = TrBlockingApi(NUMBER, PIN)
-    tr.login()
+    tr.login()  # confirm the push in the Trade Republic app
 
     res = tr.timeline()
     print(res.keys())
