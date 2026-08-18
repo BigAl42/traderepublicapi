@@ -5,7 +5,7 @@
 #      This must be executed to export the JSONs that this very py file uses
 #
 # USAGE:
-#   python3 ./examples/timelineExporterWithDocsAndDetails.py
+#   python3 ./examples/timelineCSVconvWithDetails.py
 #
 ####################################################################################################################
 
@@ -25,8 +25,8 @@ from environment import LOCALE
 
 ####################################################################################
 if LOCALE != "de":
-    print("ERROR: Unfortunately, this script works only with local DE.\n")
-    print("The JSON parsed is exported by the TR API while in DE Local.\n")
+    print("ERROR: Unfortunately, this script works only with locale DE.\n")
+    print("The JSON parsed is exported by the TR API while in DE locale.\n")
     exit(-1)
 ####################################################################################
 
@@ -50,7 +50,7 @@ with open("examples/ignoredEntries.json", "r", encoding="utf-8") as f:
 # Extract decimal number in a string
 def getDecimalFromString(inputString: str) -> Decimal:
     try:
-        numbers = re.findall("[-+]?\d.*\,\d+|\d+", inputString)
+        numbers = re.findall(r"[-+]?\d.*\,\d+|\d+", inputString)
         fResult: Decimal = Decimal(numbers[0].replace(".", "").replace(",", "."))
         return fResult
     except Exception:
@@ -75,9 +75,7 @@ def getIsinFromStockName(stockName):
         return ""  # will make it reported
 
 
-# Portfolio Performance transaction types
-# Kauf, Einlage, Verkauf, Zinsen, Gebühren, Dividende, Umbuchung (Eingang), Umbuchung (Ausgang)
-# Buy, Deposit, Sell, Interest, Fees, Dividends, Transfer (Inbound), Transfer (Outbound)
+# Portfolio Performance types (DE / EN): Buy, Deposit, Sell, Interest, Fees, Dividend, Transfer in/out
 
 missingIsins = {}
 entriesToIgnore = {}
@@ -100,9 +98,7 @@ def inCurrencyType(dec: Decimal) -> float:
 
 
 def processEvent(detailEv, lColList2, lTypeList2, currRecord):
-    # we keep the header management hear to have this accessed only here.
-    #    Otherwise, Detailed comment Header Management is hardcoded and
-    #    thus, not dependent of details themselves
+    # Keep header management here so this is the only place that touches it.
     DET_COMMENT_HEADER = "Detail Comment"
     if DET_COMMENT_HEADER not in lColList2:
         lColList2.append(DET_COMMENT_HEADER)
@@ -204,7 +200,7 @@ def reorderColumns(lColList2, lTypeList2):
     S_ORDEREDCOLS = ["Datum"   # : "2021-12-01 18:41:29",
                     , "Type"  #
                     , "ISIN"  # : "US19260Q1076",
-                    , "Name"  # "Kauf/verkauf/company name
+                    , "Name"  # buy/sell/company name
                     , "PricePerShareInEuroMilliCent"  # : 2755000,
                     , "BankChangeInEuroMilliCent"  # : -27560000,
                     , "Anzahl(\u00dcbersicht)"  # : 10,

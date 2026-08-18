@@ -1,10 +1,12 @@
-# Lang und Schwarz
-Das Lang und Schwarz Handelsuniversum kann unter folgendem Link eingesehen werden.
+# Lang & Schwarz
+
+The Lang & Schwarz trading universe is available at:
 https://www.ls-x.de/de/handelsuniversum
 
-# PDF Konvertierung
-Das Handelsuniversum wird als PDF zur Verfügung gestellt. Dieses kann mittels der Software Tabula in JSON und CSV konvertiert werden. Das Skript convert-stammdaten.py erzeugt ein JSON Array mit den wichtigsten Informationen.
-Die Elemente sind WKN, ISIN, Name, Symbol
+# PDF conversion
+
+The trading universe is provided as a PDF. Convert it to JSON and CSV with Tabula. The script `convert-stammdaten.py` produces a JSON array with the main fields: WKN, ISIN, Name, Symbol.
+
 ```json
 [
 	[

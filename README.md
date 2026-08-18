@@ -73,7 +73,10 @@ if __name__ == '__main__':
 ```
 
 # JSON Format
-## Dividende
+
+Sample payloads from the Trade Republic timeline API (German locale). JSON `title`/`body` strings are broker data, not project documentation.
+
+## Dividend (`Dividende`)
 ```json
 {
 	"type": "timelineEvent",
@@ -96,7 +99,7 @@ if __name__ == '__main__':
 }
 ```
 
-## Einzahlung
+## Cash in (`Einzahlung`)
 ```json
 {
 	"type": "timelineEvent",
@@ -115,7 +118,7 @@ if __name__ == '__main__':
 }
 ```
 
-## Auszahlung
+## Cash out (`Auszahlung`)
 ```json
 {
 	"type": "timelineEvent",
@@ -134,7 +137,7 @@ if __name__ == '__main__':
 }
 ```
 
-## Sparplan Ausführung
+## Savings plan execution (`Sparplan Ausführung`)
 ```json
 {
 	"type": "timelineEvent",
@@ -157,7 +160,7 @@ if __name__ == '__main__':
 }
 ```
 
-## Kauf
+## Buy (`Kauf`)
 ```json
 {
 	"type": "timelineEvent",
@@ -180,7 +183,7 @@ if __name__ == '__main__':
 }
 ```
 
-## Verkauf
+## Sell (`Verkauf`)
 ```json
 {
 	"type": "timelineEvent",
