@@ -1,4 +1,5 @@
 playground.py 
+.env
 trapi/key
 trapi/playground.py
 trapi/.venv
