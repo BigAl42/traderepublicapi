@@ -1,0 +1,190 @@
+"""Offline tests and stdio smoke check for the Trade Republic MCP adapter."""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+from pydantic import ValidationError
+
+ADAPTER_DIR = Path(__file__).resolve().parent
+ROOT = ADAPTER_DIR.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+if str(ADAPTER_DIR) not in sys.path:
+    sys.path.insert(0, str(ADAPTER_DIR))
+
+
+def _fresh_import_mcp_server():
+    for name in list(sys.modules):
+        if name in {"mcp_server", "tr_client"} or name.startswith("mcp_server."):
+            del sys.modules[name]
+    import mcp_server
+
+    mcp_server._client = None
+    return mcp_server
+
+
+def _patch_client(mock: MagicMock):
+    mcp_server = _fresh_import_mcp_server()
+    mcp_server._client = mock
+    return mcp_server
+
+
+class TickerInputTest(unittest.TestCase):
+    def test_normalizes_isin(self):
+        mcp_server = _fresh_import_mcp_server()
+        parsed = mcp_server.TickerInput(ticker=" us0378331005 ")
+        self.assertEqual(parsed.ticker, "US0378331005")
+
+    def test_rejects_invalid_characters(self):
+        mcp_server = _fresh_import_mcp_server()
+        with self.assertRaises(ValidationError):
+            mcp_server.TickerInput(ticker="US-037833")
+
+
+class TradeRepublicClientTest(unittest.TestCase):
+    def test_missing_credentials_raises(self):
+        mcp_server = _fresh_import_mcp_server()
+        from tr_client import TradeRepublicClient, TradeRepublicClientError
+
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(TradeRepublicClientError) as ctx:
+                TradeRepublicClient()
+        self.assertIn("Missing credentials", str(ctx.exception))
+
+    def test_normalize_position(self):
+        from tr_client import TradeRepublicClient
+
+        raw = {
+            "isin": "US0378331005",
+            "name": "Apple",
+            "netSize": 10,
+            "averageBuyIn": 150.0,
+            "profitLoss": 25.5,
+        }
+        item = TradeRepublicClient._normalize_position(raw)
+        self.assertEqual(item["ticker"], "US0378331005")
+        self.assertEqual(item["quantity"], 10)
+        self.assertEqual(item["profit_loss"], 25.5)
+
+
+class McpToolsTest(unittest.IsolatedAsyncioTestCase):
+    def _mock_client(self) -> MagicMock:
+        mock = MagicMock()
+        mock.get_balance_info.return_value = {
+            "summary": {"total_cash": 1000.0, "buying_power": 900.0, "currency": "EUR"}
+        }
+        mock.get_holdings.return_value = [
+            {"ticker": "US0378331005", "name": "Apple", "quantity": 5, "profit_loss": 12.3}
+        ]
+        mock.get_ticker_details.return_value = {
+            "ticker": "US0378331005",
+            "instrument": {"name": "Apple"},
+            "position": {"quantity": 5},
+        }
+        return mock
+
+    async def test_get_account_summary_via_call_tool(self):
+        mock = self._mock_client()
+        mcp_server = _patch_client(mock)
+        result = await mcp_server.mcp.call_tool("get_account_summary", {})
+        self.assertTrue(result)
+        mock.get_balance_info.assert_called_once()
+
+    async def test_list_active_positions_via_call_tool(self):
+        mock = self._mock_client()
+        mcp_server = _patch_client(mock)
+        result = await mcp_server.mcp.call_tool("list_active_positions", {})
+        self.assertTrue(result)
+        mock.get_holdings.assert_called_once()
+
+    async def test_get_position_details_validates_ticker(self):
+        mock = self._mock_client()
+        mcp_server = _patch_client(mock)
+        await mcp_server.mcp.call_tool("get_position_details", {"ticker": "US0378331005"})
+        mock.get_ticker_details.assert_called_once_with("US0378331005")
+
+    async def test_api_error_returns_structured_message(self):
+        mock = MagicMock()
+        mcp_server = _fresh_import_mcp_server()
+        import tr_client
+
+        mock.get_balance_info.side_effect = tr_client.TradeRepublicClientError(
+            "Session expired or invalid TR_TOKEN.", retryable=True
+        )
+        mcp_server._client = mock
+        with self.assertRaises(Exception) as ctx:
+            await mcp_server.mcp.call_tool("get_account_summary", {})
+        self.assertIn("session problem", str(ctx.exception).lower())
+
+
+class StdioSmokeTest(unittest.IsolatedAsyncioTestCase):
+    async def test_stdio_tool_roundtrip(self):
+        """Start the MCP server over stdio, call one tool, verify the response."""
+        from mcp import ClientSession, StdioServerParameters
+        from mcp.client.stdio import stdio_client
+
+        bootstrap = f"""
+import os
+from unittest.mock import MagicMock, patch
+
+os.environ.setdefault("TR_TOKEN", "offline-test-token")
+mock = MagicMock()
+mock.get_balance_info.return_value = {{
+    "summary": {{"total_cash": 123.45, "buying_power": 100.0, "currency": "EUR"}}
+}}
+patch("mcp_server.get_client", return_value=mock).start()
+
+from mcp_server import mcp
+mcp.run(transport="stdio")
+"""
+        with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as handle:
+            handle.write(bootstrap)
+            bootstrap_path = handle.name
+
+        try:
+            params = StdioServerParameters(
+                command=sys.executable,
+                args=["-u", bootstrap_path],
+                cwd=str(ADAPTER_DIR),
+                env={**os.environ, "PYTHONPATH": f"{ROOT}:{ADAPTER_DIR}"},
+            )
+            async with stdio_client(params) as (read_stream, write_stream):
+                async with ClientSession(read_stream, write_stream) as session:
+                    await session.initialize()
+                    tools = await session.list_tools()
+                    names = {tool.name for tool in tools.tools}
+                    self.assertIn("get_account_summary", names)
+
+                    result = await session.call_tool("get_account_summary", {})
+                    self.assertFalse(result.isError)
+                    payload = "".join(
+                        block.text for block in result.content if hasattr(block, "text")
+                    )
+                    self.assertIn("123.45", payload)
+        finally:
+            Path(bootstrap_path).unlink(missing_ok=True)
+
+
+async def run_smoke_cli() -> int:
+    """CLI entry: run stdio smoke test (used by CI or manual checks)."""
+    case = StdioSmokeTest()
+    try:
+        await case.test_stdio_tool_roundtrip()
+    except Exception as exc:
+        print(f"Smoke test failed: {exc}", file=sys.stderr)
+        return 1
+    print("Smoke test passed.")
+    return 0
+
+
+if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "--smoke":
+        raise SystemExit(asyncio.run(run_smoke_cli()))
+    unittest.main()
