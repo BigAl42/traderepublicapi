@@ -1,42 +1,42 @@
-## Addendum to Export _Trade Republic_ Timeline as Excel(csv) 
+# Trade Republic API
 
-This section only explains a specific use-case, which has been tested in the examples folder. 
+Unofficial Python client for the Trade Republic private API. Not affiliated with Trade Republic Bank GmbH.
 
-**The rest of the readme is intentionally not modified.**
+Use it to read cash/portfolio, search instruments, stream quotes, export the timeline, or experiment with orders.
 
-### Steps to use
+Login uses the current **web app** flow: phone + PIN, then confirm the push in the Trade Republic app. The official app stays logged in. Capability matrix: [docs/API.md](docs/API.md).
 
-Important note: This use case is tested on Linux, python 3.8 and 
-with German Language only.
+## Install
 
- - Update the ```./examples/envConsts.py``` file with appropriate path(s).
- - copy ```environment_template.py``` to ```environment.py``` and change it to match your TR account.
- - See the ```StartMe.sh``` linux command-line script for how it is used further.
+```bash
+python3 -m pip install -r trapi/requirements.txt
+```
 
----
+Device key path (`./key`) is only for legacy `auth="device"`. Default web login stores session cookies in `tr_cookies.txt`.
 
-## Trade Republic API
+```bash
+make check   # syntax
+make test    # offline unit tests, no account required
+```
 
-This is an unofficial API for the German broker Trade Republic.
+## Timeline CSV export
 
-Unfortunately the previous owner has made his repo private. This is meant to be a follow-up repo, more features to be added in the future.
+Tested on Linux, Python 3.8, German locale.
 
-Currently, this can be used to try out algorithmic trading or learning how to process a lot of data.
+- Update `./examples/envConsts.py` with output paths.
+- Copy `examples/environment_template.py` to `examples/environment.py` and set your TR account.
+- See `startMe.sh` for the download → details/PDFs → CSV flow.
 
-Trade Republic only allows one device to be registered at the same time. So if you are currently logged in on your phone it will log you out from your phone.
+More example scripts: [examples/README.md](examples/README.md).
 
-Also running it the first time will likely error but then running it for the second time will work. Have to debug this but not much time.
+## Example: blocking timeline
 
-## Example blocking history
 ```python3
-from api import TrBlockingApi
+from trapi.api import TrBlockingApi
 
-# This will go through your most recent history events
-# and print it on the terminal
 def main():
-
     tr = TrBlockingApi(NUMBER, PIN)
-    tr.login()
+    tr.login()  # confirm the push in the Trade Republic app
 
     res = tr.timeline()
     print(res.keys())
@@ -44,9 +44,11 @@ def main():
         print(tr.timeline_detail(x["data"]["id"]))
 ```
 
+## Example: async quotes
 
-## Example async
 ```python3
+import asyncio
+from trapi.api import TRApi
 
 def process(json_data):
     print("I am a processor: ", json_data)
@@ -55,8 +57,6 @@ async def main():
     tr = TRApi(NUMBER, PIN)
     tr.login()
 
-    # Each callback can be specified 
-    # if wanted, default is print
     await tr.cash(callback=lambda x: print(f"Cash data: {x}"))
     await tr.portfolio()
 
@@ -64,8 +64,8 @@ async def main():
     await tr.instrument(isin)
     await tr.stock_details(isin)
     await tr.ticker(isin, callback=process)
-    await tr.neon_news(isin) 
-    
+    await tr.neon_news(isin)
+
     await tr.start()
 
 if __name__ == '__main__':

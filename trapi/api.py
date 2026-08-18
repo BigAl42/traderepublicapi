@@ -9,8 +9,35 @@ import websockets
 from deprecated import deprecated
 
 import os
+import platform
+import uuid
+from datetime import datetime
+from http.cookiejar import MozillaCookieJar
+from pathlib import Path
 
 import json
+
+
+# Web frontend identity. Bump APP_VERSION when TR rejects login with CLIENT_VERSION_OUTDATED.
+APP_VERSION = os.environ.get("TR_APP_VERSION", "2.2631.13")
+WEB_PLATFORM = os.environ.get("TR_PLATFORM", "web-pro")
+WEB_USER_AGENT = os.environ.get(
+    "TR_USER_AGENT",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
+)
+WS_CONNECT_ID_WEB = 31
+WS_CONNECT_ID_APP = 21
+
+LOGIN_ERRORS = {
+    "PROCESS_GONE": "The login request expired. Please start again.",
+    "ALREADY_PROCESSED": "The login request was rejected or has already been used.",
+    "NOT_FOUND": "Trade Republic does not know this login request.",
+    "TOO_MANY_REQUESTS": "Too many attempts. Please wait before trying again.",
+    "VALIDATION_CODE_INVALID": "That authenticator code is not correct.",
+    "VALIDATION_CODE_ALREADY_USED": "That authenticator code was already used.",
+    "NUMBER_INVALID": "The phone number is not a Trade Republic account.",
+    "CLIENT_VERSION_OUTDATED": "This client version is rejected. Update APP_VERSION / headers.",
+}
 
 
 class TRapiException(Exception):
@@ -28,16 +55,34 @@ class TRapiExcServerUnknownState(TRapiException):
 class TRApi:
     url = "https://api.traderepublic.com"
 
-    def __init__(self, number, pin, locale='en'):
+    def __init__(self, number, pin, locale='en', key_file=None, auth="web", cookies_file=None):
         self.number = number
         self.pin = pin
         self.locale = locale
+        self.auth = auth
+        self.key_file = key_file or os.environ.get("TR_KEY_FILE", "key")
+        self.cookies_file = Path(cookies_file or os.environ.get("TR_COOKIES_FILE", "tr_cookies.txt"))
         self.signing_key = None
         self.ws = None
         self.sessionToken = None
         self.refreshToken = None
+        self.sec_acc_no = None
+        self._process_id = None
+        self._required_action = None
+        self._device_info = None
+        self._session_expires_at = 0
         self.mu = asyncio.Lock()
         self.started = False
+
+        self.session = requests.Session()
+        self.session.headers.update({"User-Agent": WEB_USER_AGENT})
+        jar = MozillaCookieJar(str(self.cookies_file))
+        if self.cookies_file.is_file():
+            try:
+                jar.load(ignore_discard=True, ignore_expires=True)
+            except (OSError, ValueError):
+                pass
+        self.session.cookies = jar
 
         types = ["cash", "portfolio", "availableCash"]
 
@@ -46,6 +91,97 @@ class TRApi:
         self.callbacks = {}
 
         self.latest_response = {}
+
+    def _stable_device_id(self):
+        seed = "|".join(
+            [str(uuid.getnode()), platform.node(), platform.machine(), platform.system()]
+        )
+        return hashlib.sha512(seed.encode()).hexdigest()
+
+    def _timezone_name(self):
+        try:
+            return str(Path("/etc/localtime").resolve()).split("zoneinfo/")[1]
+        except (OSError, IndexError):
+            return "Etc/UTC"
+
+    def _login_headers(self):
+        if self._device_info is None:
+            chrome = None
+            ua = self.session.headers.get("User-Agent", "")
+            if "Chrome/" in ua:
+                chrome = ua.split("Chrome/", 1)[1].split(" ")[0]
+            offset = datetime.now().astimezone().utcoffset()
+            device = {
+                "stableDeviceId": self._stable_device_id(),
+                "browser": "Chrome",
+                "browserVersion": chrome or "",
+                "os": platform.system(),
+                "osVersion": platform.release(),
+                "timezone": self._timezone_name(),
+                "timezoneOffset": -int(offset.total_seconds() // 60) if offset else 0,
+                "screen": "1920x1080x24",
+                "preferredLanguages": [self.locale],
+                "numberOfCores": os.cpu_count() or 1,
+            }
+            self._device_info = base64.b64encode(json.dumps(device).encode()).decode()
+        return {
+            "X-TR-Device-Info": self._device_info,
+            "X-TR-App-Version": APP_VERSION,
+            "X-Tr-Platform": WEB_PLATFORM,
+            "Accept-Language": self.locale,
+        }
+
+    def _raise_login_error(self, response):
+        if response.status_code < 400:
+            return
+        try:
+            code = response.json()["errors"][0]["errorCode"]
+        except (ValueError, KeyError, IndexError, TypeError):
+            raise TRapiException(
+                f"Login failed with status {response.status_code}: {response.text[:300]}"
+            )
+        raise TRapiException(LOGIN_ERRORS.get(code, f"Login failed: {code}."))
+
+    def _save_cookies(self):
+        try:
+            self.cookies_file.parent.mkdir(parents=True, exist_ok=True)
+            self.session.cookies.save(ignore_discard=True, ignore_expires=True)
+        except OSError:
+            pass
+
+    def _refresh_web_session(self):
+        r = self.session.get(f"{self.url}/api/v1/auth/web/session", timeout=20)
+        if r.status_code < 400:
+            self._session_expires_at = time.time() + 290
+        return r
+
+    def refresh_account_settings(self):
+        """Load /api/v2/auth/account and cache securitiesAccountNumber."""
+        self._refresh_web_session()
+        r = self.session.get(
+            f"{self.url}/api/v2/auth/account",
+            headers=self._login_headers(),
+            timeout=20,
+        )
+        if r.status_code >= 400:
+            return None
+        data = r.json()
+        self.sec_acc_no = data.get("securitiesAccountNumber") or self.sec_acc_no
+        return data
+
+    def _resume_web_session(self):
+        if not self.cookies_file.is_file():
+            return False
+        data = self.refresh_account_settings()
+        if data is None:
+            self.session.cookies.clear()
+            return False
+        cookie = next(
+            (c.value for c in self.session.cookies if c.name == "tr_session"),
+            None,
+        )
+        self.sessionToken = cookie
+        return True
 
     def register_new_device(self, processId=None):
         self.signing_key = SigningKey.generate(curve=NIST256p, hashfunc=hashlib.sha512)
@@ -62,7 +198,7 @@ class TRApi:
                 bFailed = True
 
             if bFailed:
-                raise Exception(f"Cannot Login! Details: {r.text}")
+                raise TRapiException(f"Cannot Login! Details: {r.text}")
             else:
                 print(f"*** The process id is: {processId}")
 
@@ -79,33 +215,32 @@ class TRApi:
 
         if r.status_code == 200:
             key = self.signing_key.to_pem()
-            with open("key", "wb") as f:
+            with open(self.key_file, "wb") as f:
                 f.write(key)
 
             return key
-        else:
-            print("no")
+        raise TRapiException(f"Device registration failed: {r.status_code} {r.text}")
 
-    def login(self, **kwargs):
-
+    def _login_device(self, **kwargs):
         res = None
-        if os.path.isfile("key"):
+        if os.path.isfile(self.key_file):
             res = self.do_request(
                 "/api/v1/auth/login",
                 payload={"phoneNumber": self.number, "pin": self.pin},
             )
 
-        # The user is currently signed in with a different device
-        if res == None or (
-                res.status_code == 401
-                and not kwargs.get("already_tried_registering", False)
+        if res is None or (
+            res.status_code == 401
+            and not kwargs.get("already_tried_registering", False)
         ):
             self.register_new_device()
-            res = self.login(already_tried_registering=True)
+            res = self._login_device(already_tried_registering=True)
 
         if res.status_code != 200:
-            print(res.json(), res.status_code)
-            raise TRapiException("could not login - see printed status_code")
+            raise TRapiException(
+                f"Device login failed ({res.status_code}). "
+                "The app ECDSA login is outdated; use auth='web' (default)."
+            )
 
         data = res.json()
         self.refreshToken = data["refreshToken"]
@@ -116,18 +251,139 @@ class TRApi:
 
         return res
 
-    async def sub(self, payload_key, callback, **kwargs):
-        if self.ws is None:
-            self.ws = await websockets.connect("wss://api.traderepublic.com")
-            msg = json.dumps({"locale": self.locale})
-            await self.ws.send(f"connect 21 {msg}")
-            response = await self.ws.recv()
+    def _weblogin_process(self):
+        r = self.session.get(
+            f"{self.url}/api/v2/auth/web/login/processes/{self._process_id}",
+            headers=self._login_headers(),
+            timeout=20,
+        )
+        self._raise_login_error(r)
+        return r.json()
 
-            if not response == "connected":
-                raise TRapiException(f"Connection Error: {response}")  # ValueError(f"Connection Error: {response}")
+    def _await_web_confirmation(self, timeout=120):
+        process = self._weblogin_process()
+        deadline = time.time() + timeout
+        expires = process.get("expiresAt")
+        try:
+            if isinstance(expires, (int, float)):
+                deadline = expires / 1000 if expires > 1e11 else float(expires)
+        except (TypeError, ValueError):
+            pass
+        print("Confirm this login in the Trade Republic app (push notification)...")
+        while True:
+            status = process.get("status")
+            if status in ("CONFIRMED", "COMPLETED"):
+                print("Login confirmed.")
+                return
+            if status not in (None, "PENDING"):
+                raise TRapiException(f"Unexpected login process status: {status!r}")
+            if time.time() >= deadline:
+                raise TRapiException("The login was not confirmed in time.")
+            time.sleep(2)
+            process = self._weblogin_process()
+
+    def _complete_authenticator(self, code):
+        r = self.session.post(
+            f"{self.url}/api/v2/auth/web/login/processes/{self._process_id}/authenticator-verification",
+            json={"code": code},
+            headers=self._login_headers(),
+            timeout=20,
+        )
+        self._raise_login_error(r)
+
+    def _login_web(self, **kwargs):
+        if kwargs.get("resume", True) and self._resume_web_session():
+            print("Resumed saved Trade Republic web session.")
+            return True
+
+        r = self.session.post(
+            f"{self.url}/api/v2/auth/web/login",
+            json={"phoneNumber": self.number, "pin": self.pin},
+            headers=self._login_headers(),
+            timeout=20,
+        )
+        self._raise_login_error(r)
+        data = r.json()
+        self._process_id = data.get("processId")
+        if not self._process_id:
+            raise TRapiException(f"Web login did not return processId: {data}")
+
+        try:
+            self._required_action = self._weblogin_process().get("requiredAction")
+        except TRapiException:
+            self._required_action = None
+
+        if self._required_action == "AUTHENTICATOR_VERIFICATION":
+            code = kwargs.get("authenticator_code") or os.environ.get("TR_AUTHENTICATOR_CODE")
+            if not code:
+                code = input("Authenticator code: ")
+            self._complete_authenticator(code)
+        else:
+            self._await_web_confirmation(timeout=kwargs.get("login_timeout", 120))
+
+        self._save_cookies()
+        self._refresh_web_session()
+        self.refresh_account_settings()
+        cookie = next(
+            (c.value for c in self.session.cookies if c.name == "tr_session"),
+            None,
+        )
+        self.sessionToken = cookie
+        return True
+
+    def login(self, **kwargs):
+        """Log in. Default is current web login (v2 push confirm in the app).
+
+        auth='web' keeps the phone app logged in.
+        auth='device' is the legacy ECDSA pairing path (usually CLIENT_VERSION_OUTDATED).
+        """
+        if self.auth == "device":
+            return self._login_device(**kwargs)
+        return self._login_web(**kwargs)
+
+    def _ws_cookie_header(self):
+        parts = [
+            f"{cookie.name}={cookie.value}"
+            for cookie in self.session.cookies
+            if getattr(cookie, "domain", "").endswith("traderepublic.com")
+        ]
+        if not parts:
+            return None
+        return {"Cookie": "; ".join(parts)}
+
+    async def _ensure_ws(self):
+        if self.ws is not None:
+            return
+        extra_headers = self._ws_cookie_header()
+        connect_kwargs = {}
+        if extra_headers:
+            connect_kwargs["additional_headers"] = extra_headers
+        self.ws = await websockets.connect("wss://api.traderepublic.com", **connect_kwargs)
+        if self.auth == "device":
+            msg = json.dumps({"locale": self.locale})
+            connect_id = WS_CONNECT_ID_APP
+        else:
+            msg = json.dumps(
+                {
+                    "locale": self.locale,
+                    "platformId": "webtrading",
+                    "platformVersion": "chrome - 94.0.4606",
+                    "clientId": "app.traderepublic.com",
+                    "clientVersion": "5582",
+                }
+            )
+            connect_id = WS_CONNECT_ID_WEB
+        await self.ws.send(f"connect {connect_id} {msg}")
+        response = await self.ws.recv()
+        if response != "connected":
+            raise TRapiException(f"Connection Error: {response}")
+
+    async def sub(self, payload_key, callback, **kwargs):
+        await self._ensure_ws()
 
         payload = kwargs.get("payload", {"type": payload_key})
-        payload["token"] = self.sessionToken
+        if self.auth == "device" and self.sessionToken:
+            payload["token"] = self.sessionToken
 
         key = kwargs.get("key", payload_key)
         id = self.type_to_id(key)
@@ -143,7 +399,7 @@ class TRApi:
     def do_request(self, path, payload):
 
         if self.signing_key is None:
-            with open("key", "rb") as f:
+            with open(self.key_file, "rb") as f:
                 self.signing_key = SigningKey.from_pem(
                     f.read(), hashfunc=hashlib.sha512
                 )
@@ -174,6 +430,7 @@ class TRApi:
 
     exchange_list = ["LSX", "TDG", "LUS", "TUB", "BHS", "B2C"]
     range_list = ["1d", "5d", "1m", "3m", "1y", "max"]
+    product_category_list = ["vanillaWarrant", "knockOutProduct", "factor"]
     instrument_list = ["stock", "fund", "derivative", "crypto"]
     jurisdiction_list = ["AT", "DE", "ES", "FR", "IT", "NL", "BE", "EE", "FI", "IE", "GR", "LU", "LT",
                          "LV", "PT", "SI", "SK"]
@@ -227,7 +484,19 @@ class TRApi:
         """availableCashForPayout request"""
         await self.sub("availableCashForPayout", callback)
 
-    # todo availableSize
+    async def available_size(self, isin, exchange="LSX", callback=print):
+        """availableSize request — how many units can be bought/sold at the exchange."""
+        if exchange not in self.exchange_list:
+            raise TRapiException(f"exchange must be either one of {self.exchange_list}")
+        return await self.sub(
+            "availableSize",
+            payload={
+                "type": "availableSize",
+                "parameters": {"exchangeId": exchange, "instrumentId": isin},
+            },
+            callback=callback,
+            key=f"availableSize {isin} {exchange}",
+        )
 
     async def cancel_order(self, id, callback=print):
         """cancelOrder request"""
@@ -238,7 +507,14 @@ class TRApi:
             key=f"cancelOrder {id}"
         )
 
-    # todo cancelPriceAlarm
+    async def cancel_price_alarm(self, id, callback=print):
+        """cancelPriceAlarm request"""
+        return await self.sub(
+            "cancelPriceAlarm",
+            payload={"type": "cancelPriceAlarm", "id": id},
+            callback=callback,
+            key=f"cancelPriceAlarm {id}",
+        )
 
     async def cancel_savings_plan(self, id, callback=print):
         """cancelSavingsPlan request"""
@@ -268,7 +544,7 @@ class TRApi:
         return await self.sub(
             "changeSavingsPlan",
             payload={
-                "type": "createSavingsPlan",
+                "type": "changeSavingsPlan",
                 "id": id,
                 "parameters": params,
                 "warningsShown": warnings_shown,
@@ -280,8 +556,25 @@ class TRApi:
     # todo collection
 
     async def compact_portfolio(self, callback=print):
-        """compactPortfolio request"""
+        """compactPortfolio request (legacy). Prefer compact_portfolio_by_type."""
         await self.sub("compactPortfolio", callback)
+
+    async def compact_portfolio_by_type(self, sec_acc_no=None, callback=print):
+        """compactPortfolioByType request — current TR web portfolio endpoint (2026)."""
+        payload = {"type": "compactPortfolioByType"}
+        sec_acc_no = sec_acc_no or self.sec_acc_no
+        if sec_acc_no:
+            payload["secAccNo"] = sec_acc_no
+        return await self.sub(
+            "compactPortfolioByType",
+            payload=payload,
+            callback=callback,
+            key=f"compactPortfolioByType {sec_acc_no}",
+        )
+
+    async def account_pairs(self, callback=print):
+        """accountPairs request — securities/cash account numbers including tax wrappers."""
+        return await self.sub("accountPairs", callback)
 
     # todo  confirmOrder
 
@@ -319,10 +612,32 @@ class TRApi:
             key=f"createSavingsPlan {params} {warnings_shown}"
         )
 
-    # todo cryptoDetails
-    # todo etfComposition
-    # todo etfDetails
-    # todo  followWatchlist
+    async def crypto_details(self, isin, callback=print):
+        """cryptoDetails request"""
+        return await self.sub(
+            "cryptoDetails",
+            payload={"type": "cryptoDetails", "id": isin},
+            callback=callback,
+            key=f"cryptoDetails {isin}",
+        )
+
+    async def etf_composition(self, isin, callback=print):
+        """etfComposition request"""
+        return await self.sub(
+            "etfComposition",
+            payload={"type": "etfComposition", "id": isin},
+            callback=callback,
+            key=f"etfComposition {isin}",
+        )
+
+    async def etf_details(self, isin, callback=print):
+        """etfDetails request"""
+        return await self.sub(
+            "etfDetails",
+            payload={"type": "etfDetails", "id": isin},
+            callback=callback,
+            key=f"etfDetails {isin}",
+        )
 
     async def frontend_experiment(self, operation, experimentId, identifier, callback=print):
         """frontendExperiment request"""
@@ -391,8 +706,11 @@ class TRApi:
         await self.sub("neonCards", callback)
 
     async def derivatives(self, isin, product_category, callback=print):
-        # todo: create list for product_category
         """derivatives request"""
+        if product_category not in self.product_category_list:
+            raise TRapiException(
+                f"product_category must be either one of {self.product_category_list}"
+            )
         return await self.sub(
             "derivatives",
             payload={"type": "derivatives", "underlying": isin, "productCategory": product_category},
@@ -404,9 +722,10 @@ class TRApi:
                           callback=print):
         """neonSearch request
 
-        No login required
-#todo params
-        :return: list of instruments"""
+        No login required.
+
+        :return: list of instruments
+        """
 
         if instrument_type not in self.instrument_list:
             raise TRapiException(f"type must be either one of {self.instrument_list}")
@@ -493,7 +812,9 @@ class TRApi:
             key=f"news {isin}"
         )
 
-    # todo newsSubscriptions
+    async def news_subscriptions(self, callback=print):
+        """newsSubscriptions request"""
+        return await self.sub("newsSubscriptions", callback)
 
     async def orders(self, terminated=False, callback=print):
         """orders request"""
@@ -503,7 +824,16 @@ class TRApi:
             payload={"type": "orders", "terminated": terminated},
             key=f"orders {terminated}")
 
-    # todo  performance
+    async def performance(self, isin, exchange="LSX", callback=print):
+        """performance request"""
+        if exchange not in self.exchange_list:
+            raise TRapiException(f"exchange must be either one of {self.exchange_list}")
+        return await self.sub(
+            "performance",
+            payload={"type": "performance", "id": f"{isin}.{exchange}"},
+            callback=callback,
+            key=f"performance {isin} {exchange}",
+        )
 
     async def portfolio(self, callback=print):
         """portfolio"""
@@ -520,7 +850,16 @@ class TRApi:
             key=f"portfolioAggregateHistory {range}",
         )
 
-    # todo portfolioAggregateHistoryLight
+    async def portfolio_aggregate_history_light(self, range="max", callback=print):
+        """portfolioAggregateHistoryLight request"""
+        if range not in self.range_list:
+            raise TRapiException(f"Range of time must be either one of {self.range_list}")
+        return await self.sub(
+            "portfolioAggregateHistoryLight",
+            payload={"type": "portfolioAggregateHistoryLight", "range": range},
+            callback=callback,
+            key=f"portfolioAggregateHistoryLight {range}",
+        )
     async def portfolio_status(self, callback=print):
         """portfolioStatus request"""
         return await self.sub("portfolioStatus", callback)
@@ -529,18 +868,49 @@ class TRApi:
         """priceAlarms request"""
         return await self.sub("priceAlarms", callback)
 
-    # todo priceForOrder
+    async def price_for_order(self, isin, exchange="LSX", order_type="buy", callback=print):
+        """priceForOrder request"""
+        if exchange not in self.exchange_list:
+            raise TRapiException(f"exchange must be either one of {self.exchange_list}")
+        if order_type not in self.order_type_list:
+            raise TRapiException(f"order_Type must be either of {self.order_type_list}")
+        return await self.sub(
+            "priceForOrder",
+            payload={
+                "type": "priceForOrder",
+                "parameters": {
+                    "exchangeId": exchange,
+                    "instrumentId": isin,
+                    "type": order_type,
+                },
+            },
+            callback=callback,
+            key=f"priceForOrder {isin} {exchange} {order_type}",
+        )
     async def remove_from_watchlist(self, instrument_id, callback=print):
         """removeFromWatchlist request"""
         return await self.sub(
-            "orders",
+            "removeFromWatchlist",
             callback=callback,
             payload={"type": "removeFromWatchlist", "instrumentId": instrument_id},
             key=f"removeFromWatchlist {instrument_id}")
 
-    # todo savingsPlanParameters
-    # todo  savingsPlans
-    # todo  settings
+    async def savings_plan_parameters(self, isin, callback=print):
+        """savingsPlanParameters request"""
+        return await self.sub(
+            "savingsPlanParameters",
+            payload={"type": "savingsPlanParameters", "instrumentId": isin},
+            callback=callback,
+            key=f"savingsPlanParameters {isin}",
+        )
+
+    async def savings_plans(self, callback=print):
+        """savingsPlans request"""
+        return await self.sub("savingsPlans", callback)
+
+    async def settings(self, callback=print):
+        """settings request"""
+        return await self.sub("settings", callback)
 
     async def simple_create_order(
             self,
@@ -635,8 +1005,6 @@ class TRApi:
             key=f"stockDetails {isin}",
         )
 
-    # todo subscribeNews
-
     async def ticker(self, isin, exchange="LSX", callback=print):
         """ticker request"""
 
@@ -663,6 +1031,24 @@ class TRApi:
         """timelineActions request"""
         return await self.sub("timelineActions", callback)
 
+    async def timeline_transactions(self, after=None, callback=print):
+        """timelineTransactions request — cash-relevant timeline subset."""
+        return await self.sub(
+            "timelineTransactions",
+            payload={"type": "timelineTransactions", "after": after},
+            callback=callback,
+            key=f"timelineTransactions {after}",
+        )
+
+    async def timeline_activity_log(self, after=None, callback=print):
+        """timelineActivityLog request"""
+        return await self.sub(
+            "timelineActivityLog",
+            payload={"type": "timelineActivityLog", "after": after},
+            callback=callback,
+            key=f"timelineActivityLog {after}",
+        )
+
     async def timeline_detail(self, id, callback=print):
         """timelineDetail request"""
         return await self.sub(
@@ -672,9 +1058,33 @@ class TRApi:
             key=f"timelineDetail {id}",
         )
 
-    #  todo tradingPerkConditionStatus
-    #  todo unfollowWatchlist
-    #  todo unsubscribeNews
+    async def timeline_detail_v2(self, id, callback=print):
+        """timelineDetailV2 request — current detail payload used by the TR app."""
+        return await self.sub(
+            "timelineDetailV2",
+            payload={"type": "timelineDetailV2", "id": id},
+            callback=callback,
+            key=f"timelineDetailV2 {id}",
+        )
+
+    async def subscribe_news(self, isin, callback=print):
+        """subscribeNews request"""
+        return await self.sub(
+            "subscribeNews",
+            payload={"type": "subscribeNews", "instrumentId": isin},
+            callback=callback,
+            key=f"subscribeNews {isin}",
+        )
+
+    async def unsubscribe_news(self, isin, callback=print):
+        """unsubscribeNews request"""
+        return await self.sub(
+            "unsubscribeNews",
+            payload={"type": "unsubscribeNews", "instrumentId": isin},
+            callback=callback,
+            key=f"unsubscribeNews {isin}",
+        )
+
     async def watchlist(self, callback=print):
         """watchlist request"""
         return await self.sub("watchlist", callback)
@@ -866,9 +1276,12 @@ class TRApi:
 
 
 class TrBlockingApi(TRApi):
-    def __init__(self, number, pin, timeout=20.0, locale="en"):
+    def __init__(self, number, pin, timeout=20.0, locale="en", key_file=None, auth="web", cookies_file=None):
         self.timeout = timeout
-        super().__init__(number, pin, locale)
+        super().__init__(number, pin, locale, key_file=key_file, auth=auth, cookies_file=cookies_file)
+
+    def _run(self, coro):
+        return asyncio.get_event_loop().run_until_complete(self.get_one(coro))
 
     async def get_one(self, f):
         await f
@@ -919,6 +1332,9 @@ class TrBlockingApi(TRApi):
             self.get_one(super().neon_news(isin))
         )
 
+    def neon_search_tags(self):
+        return self._run(super().neon_search_tags())
+
     def orders(self):
         return asyncio.get_event_loop().run_until_complete(
             self.get_one(super().orders())
@@ -964,6 +1380,54 @@ class TrBlockingApi(TRApi):
             self.get_one(super().timeline_detail(id=id))
         )
 
+    def account_pairs(self):
+        return self._run(super().account_pairs())
+
+    def compact_portfolio(self):
+        return self._run(super().compact_portfolio())
+
+    def compact_portfolio_by_type(self, sec_acc_no=None):
+        return self._run(super().compact_portfolio_by_type(sec_acc_no=sec_acc_no))
+
+    def crypto_details(self, isin):
+        return self._run(super().crypto_details(isin))
+
+    def etf_details(self, isin):
+        return self._run(super().etf_details(isin))
+
+    def etf_composition(self, isin):
+        return self._run(super().etf_composition(isin))
+
+    def news_subscriptions(self):
+        return self._run(super().news_subscriptions())
+
+    def performance(self, isin, exchange="LSX"):
+        return self._run(super().performance(isin, exchange=exchange))
+
+    def portfolio_status(self):
+        return self._run(super().portfolio_status())
+
+    def price_alarms(self):
+        return self._run(super().price_alarms())
+
+    def savings_plans(self):
+        return self._run(super().savings_plans())
+
+    def settings(self):
+        return self._run(super().settings())
+
+    def timeline_transactions(self, after=None):
+        return self._run(super().timeline_transactions(after=after))
+
+    def timeline_activity_log(self, after=None):
+        return self._run(super().timeline_activity_log(after=after))
+
+    def timeline_detail_v2(self, id):
+        return self._run(super().timeline_detail_v2(id))
+
+    def watchlist(self):
+        return self._run(super().watchlist())
+
     # -----------------------------------------------------------
     # old names of functions
 
@@ -977,7 +1441,7 @@ class TrBlockingApi(TRApi):
 
     @deprecated(reason="Use function orders")
     def curr_orders(self):
-        self.orders()
+        return self.orders()
 
     @deprecated(reason="Use function portfolio_aggregate_history")
     def port_hist(self, range="max"):
@@ -991,6 +1455,6 @@ class TrBlockingApi(TRApi):
     def stock_history(self, isin, range="max"):
         return self.aggregate_history_light(isin, range=range)
 
-    @deprecated(reason="Use function neon_news")
+    @deprecated(reason="Use function timeline_detail")
     def hist_event(self, id):
         return self.timeline_detail(id)

@@ -2,6 +2,8 @@
 
 For these examples, copy `environment_template.py` to `environment.py` and enter your Trade Republic login details.
 
+The library also supports cash, portfolio (`compact_portfolio_by_type` is the current TR web endpoint), search, quotes, savings plans, and timeline v2 details. Login: `tr.login()` then confirm the push in the Trade Republic app. See [docs/API.md](../docs/API.md).
+
 # ISINs
 
 Some company names cannot be resolved automatically. To still include those ISINs in the export, add them to `companyNameIsins.json`.
