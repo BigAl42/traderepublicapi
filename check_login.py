@@ -75,66 +75,73 @@ except ImportError as exc:
     print("       Run:  pip install -r requirements.txt")
     sys.exit(1)
 
-print("[1/4]  Creating client …")
-try:
-    client = TradeRepublicClient()
-except TradeRepublicClientError as exc:
-    print(f"ERROR: {exc}")
-    sys.exit(1)
+import asyncio  # noqa: E402
 
-# ---------------------------------------------------------------------------
-# Trigger login / session resume
-# ---------------------------------------------------------------------------
-print("[2/4]  Connecting to Trade Republic …")
-if token:
-    print("       Using TR_TOKEN (session resume — no push needed)")
-else:
-    print("       Using TR_PHONE + TR_PIN")
-    print("       >>> Open the Trade Republic app and CONFIRM the login push! <<<")
 
-try:
-    client._ensure_session()
-    print("[2/4]  Session established ✓")
-except TradeRepublicClientError as exc:
-    print(f"ERROR: Login failed: {exc}")
-    sys.exit(1)
+async def _run_checks():
+    print("[1/4]  Creating client …")
+    try:
+        client = TradeRepublicClient()
+    except TradeRepublicClientError as exc:
+        print(f"ERROR: {exc}")
+        sys.exit(1)
 
-# ---------------------------------------------------------------------------
-# Fetch account summary
-# ---------------------------------------------------------------------------
-print("[3/4]  Fetching account summary …")
-try:
-    summary = client.get_balance_info()
-    s = summary.get("summary", {})
-    print(f"       Cash:        {s.get('total_cash', '?')} {s.get('currency', '')}")
-    print(f"       Buying power:{s.get('buying_power', '?')} {s.get('currency', '')}")
-    print("[3/4]  Account summary ✓")
-except TradeRepublicClientError as exc:
-    print(f"ERROR: {exc}")
-    sys.exit(1)
-
-# ---------------------------------------------------------------------------
-# Fetch holdings
-# ---------------------------------------------------------------------------
-print("[4/4]  Fetching portfolio positions …")
-try:
-    positions = client.get_holdings()
-    if positions:
-        for pos in positions[:5]:
-            ticker = pos.get("ticker", "?")
-            name   = pos.get("name") or ticker
-            qty    = pos.get("quantity", "?")
-            pl     = pos.get("profit_loss")
-            pl_str = f"  P/L: {pl}" if pl is not None else ""
-            print(f"       {ticker}  {name}  qty={qty}{pl_str}")
-        if len(positions) > 5:
-            print(f"       … and {len(positions) - 5} more positions")
+    # -------------------------------------------------------------------
+    # Trigger login / session resume
+    # -------------------------------------------------------------------
+    print("[2/4]  Connecting to Trade Republic …")
+    if token:
+        print("       Using TR_TOKEN (session resume — no push needed)")
     else:
-        print("       (no positions found)")
-    print("[4/4]  Portfolio ✓")
-except TradeRepublicClientError as exc:
-    print(f"ERROR: {exc}")
-    sys.exit(1)
+        print("       Using TR_PHONE + TR_PIN")
+        print("       >>> Open the Trade Republic app and CONFIRM the login push! <<<")
 
-print()
-print("All checks passed — MCP adapter is ready to use.")
+    try:
+        client._ensure_session()
+        print("[2/4]  Session established ✓")
+    except TradeRepublicClientError as exc:
+        print(f"ERROR: Login failed: {exc}")
+        sys.exit(1)
+
+    # -------------------------------------------------------------------
+    # Fetch account summary
+    # -------------------------------------------------------------------
+    print("[3/4]  Fetching account summary …")
+    try:
+        summary = await client.get_balance_info()
+        s = summary.get("summary", {})
+        print(f"       Cash:        {s.get('total_cash', '?')} {s.get('currency', '')}")
+        print(f"       Buying power:{s.get('buying_power', '?')} {s.get('currency', '')}")
+        print("[3/4]  Account summary ✓")
+    except TradeRepublicClientError as exc:
+        print(f"ERROR: {exc}")
+        sys.exit(1)
+
+    # -------------------------------------------------------------------
+    # Fetch holdings
+    # -------------------------------------------------------------------
+    print("[4/4]  Fetching portfolio positions …")
+    try:
+        positions = await client.get_holdings()
+        if positions:
+            for pos in positions[:5]:
+                ticker = pos.get("ticker", "?")
+                name   = pos.get("name") or ticker
+                qty    = pos.get("quantity", "?")
+                pl     = pos.get("profit_loss")
+                pl_str = f"  P/L: {pl}" if pl is not None else ""
+                print(f"       {ticker}  {name}  qty={qty}{pl_str}")
+            if len(positions) > 5:
+                print(f"       … and {len(positions) - 5} more positions")
+        else:
+            print("       (no positions found)")
+        print("[4/4]  Portfolio ✓")
+    except TradeRepublicClientError as exc:
+        print(f"ERROR: {exc}")
+        sys.exit(1)
+
+    print()
+    print("All checks passed — MCP adapter is ready to use.")
+
+
+asyncio.run(_run_checks())

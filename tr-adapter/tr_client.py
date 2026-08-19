@@ -1,11 +1,15 @@
 """Read-only Trade Republic client wrapper for the MCP adapter.
 
-Wraps the repository's TrBlockingApi without modifying trapi/.
+Uses TRApi (async) directly so all data methods can be awaited inside the
+MCP server's event loop — avoids the ``RuntimeError: This event loop is
+already running`` that TrBlockingApi triggers via ``run_until_complete``.
+
 Credentials come from environment variables only (see .env.example).
 """
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 from http.cookiejar import Cookie
@@ -16,7 +20,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from trapi.api import TRapiException, TRapiExcServerErrorState, TrBlockingApi  # noqa: E402
+from trapi.api import TRApi, TRapiException, TRapiExcServerErrorState  # noqa: E402
 
 
 class TradeRepublicClientError(Exception):
@@ -28,7 +32,12 @@ class TradeRepublicClientError(Exception):
 
 
 class TradeRepublicClient:
-    """Read-only facade over TrBlockingApi for Hermes / MCP."""
+    """Async read-only facade over TRApi for Hermes / MCP.
+
+    All data methods are ``async`` so they work inside the MCP server's
+    already-running event loop.  Login is synchronous (HTTP via requests)
+    and is called once before the first WebSocket subscription.
+    """
 
     def __init__(self, token: str | None = None):
         self._token = token or os.getenv("TR_TOKEN")
@@ -36,6 +45,7 @@ class TradeRepublicClient:
         pin = os.getenv("TR_PIN", "")
         locale = os.getenv("TR_LOCALE", "de")
         cookies_file = os.getenv("TR_COOKIES_FILE", "tr_cookies.txt")
+        self._timeout = float(os.getenv("TR_TIMEOUT", "20"))
 
         if not self._token and (not phone or not pin):
             raise TradeRepublicClientError(
@@ -43,7 +53,7 @@ class TradeRepublicClient:
                 retryable=False,
             )
 
-        self._api = TrBlockingApi(
+        self._api = TRApi(
             phone or "+0000000000",
             pin or "0000",
             locale=locale,
@@ -77,6 +87,7 @@ class TradeRepublicClient:
         self._api.sessionToken = self._token
 
     def _ensure_session(self) -> None:
+        """Synchronous login / session resume (uses requests, no event loop)."""
         if self._session_ready:
             return
         try:
@@ -94,6 +105,17 @@ class TradeRepublicClient:
             self._session_ready = True
         except TRapiException as exc:
             raise self._map_error(exc) from exc
+
+    async def _query(self, coro: Any) -> Any:
+        """Fire one async subscription and wait for a single response.
+
+        Equivalent to ``TrBlockingApi.get_one`` but without
+        ``run_until_complete`` — safe inside a running loop.
+        """
+        await coro
+        return await asyncio.wait_for(
+            self._api.start(receive_one=True), timeout=self._timeout
+        )
 
     @staticmethod
     def _map_error(exc: Exception) -> TradeRepublicClientError:
@@ -131,14 +153,14 @@ class TradeRepublicClient:
             return [payload]
         return []
 
-    def get_balance_info(self) -> dict[str, Any]:
+    async def get_balance_info(self) -> dict[str, Any]:
         """Cash balances and buying power (read-only)."""
         self._ensure_session()
         try:
-            cash = self._api.cash()
-            available = self._api.available_cash()
-            payout = self._api.available_cash_for_payout()
-            status = self._api.portfolio_status()
+            cash = await self._query(self._api.cash())
+            available = await self._query(self._api.available_cash())
+            payout = await self._query(self._api.available_cash_for_payout())
+            status = await self._query(self._api.portfolio_status())
         except (TRapiException, TRapiExcServerErrorState) as exc:
             raise self._map_error(exc) from exc
 
@@ -175,16 +197,16 @@ class TradeRepublicClient:
             "category": raw.get("_category"),
         }
 
-    def _load_portfolio(self) -> dict[str, Any]:
+    async def _load_portfolio(self) -> dict[str, Any]:
         self._ensure_session()
         try:
-            return self._api.compact_portfolio_by_type()
+            return await self._query(self._api.compact_portfolio_by_type())
         except (TRapiException, TRapiExcServerErrorState) as exc:
             raise self._map_error(exc) from exc
 
-    def get_holdings(self) -> list[dict[str, Any]]:
+    async def get_holdings(self) -> list[dict[str, Any]]:
         """All active portfolio positions."""
-        portfolio = self._load_portfolio()
+        portfolio = await self._load_portfolio()
         positions: list[dict[str, Any]] = []
 
         categories = portfolio.get("categories") or []
@@ -204,22 +226,22 @@ class TradeRepublicClient:
                 positions.append(item)
         return positions
 
-    def get_ticker_details(self, ticker: str) -> dict[str, Any]:
+    async def get_ticker_details(self, ticker: str) -> dict[str, Any]:
         """Instrument and stock details for one ISIN/ticker."""
         self._ensure_session()
         isin = ticker.strip().upper()
         try:
-            instrument = self._api.instrument(isin)
-            details = self._api.stock_details(isin)
+            instrument = await self._query(self._api.instrument(isin))
+            details = await self._query(self._api.stock_details(isin))
             performance = None
             try:
-                performance = self._api.performance(isin)
+                performance = await self._query(self._api.performance(isin))
             except (TRapiException, TRapiExcServerErrorState):
                 performance = None
         except (TRapiException, TRapiExcServerErrorState) as exc:
             raise self._map_error(exc) from exc
 
-        holding = next((h for h in self.get_holdings() if h.get("ticker") == isin), None)
+        holding = next((h for h in await self.get_holdings() if h.get("ticker") == isin), None)
 
         return {
             "ticker": isin,

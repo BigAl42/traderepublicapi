@@ -132,7 +132,7 @@ async def get_account_summary() -> dict:
     Read-only; no orders or transfers.
     """
     try:
-        return get_client().get_balance_info()
+        return await get_client().get_balance_info()
     except Exception as exc:
         raise RuntimeError(_format_error(exc)) from exc
 
@@ -147,7 +147,7 @@ async def list_active_positions() -> list:
     Read-only.
     """
     try:
-        return get_client().get_holdings()
+        return await get_client().get_holdings()
     except Exception as exc:
         raise RuntimeError(_format_error(exc)) from exc
 
@@ -165,7 +165,7 @@ async def get_position_details(ticker: str) -> dict:
     """
     try:
         validated = TickerInput(ticker=ticker)
-        return get_client().get_ticker_details(validated.ticker)
+        return await get_client().get_ticker_details(validated.ticker)
     except Exception as exc:
         raise RuntimeError(_format_error(exc)) from exc
 

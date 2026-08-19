@@ -8,7 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from pydantic import ValidationError
 
@@ -28,6 +28,22 @@ def _fresh_import_mcp_server():
 
     mcp_server._client = None
     return mcp_server
+
+
+def _mock_client() -> MagicMock:
+    mock = MagicMock()
+    mock.get_balance_info = AsyncMock(return_value={
+        "summary": {"total_cash": 1000.0, "buying_power": 900.0, "currency": "EUR"}
+    })
+    mock.get_holdings = AsyncMock(return_value=[
+        {"ticker": "US0378331005", "name": "Apple", "quantity": 5, "profit_loss": 12.3}
+    ])
+    mock.get_ticker_details = AsyncMock(return_value={
+        "ticker": "US0378331005",
+        "instrument": {"name": "Apple"},
+        "position": {"quantity": 5},
+    })
+    return mock
 
 
 def _patch_client(mock: MagicMock):
@@ -50,7 +66,7 @@ class TickerInputTest(unittest.TestCase):
 
 class TradeRepublicClientTest(unittest.TestCase):
     def test_missing_credentials_raises(self):
-        mcp_server = _fresh_import_mcp_server()
+        _fresh_import_mcp_server()
         from tr_client import TradeRepublicClient, TradeRepublicClientError
 
         with patch.dict(os.environ, {}, clear=True):
@@ -75,48 +91,35 @@ class TradeRepublicClientTest(unittest.TestCase):
 
 
 class McpToolsTest(unittest.IsolatedAsyncioTestCase):
-    def _mock_client(self) -> MagicMock:
-        mock = MagicMock()
-        mock.get_balance_info.return_value = {
-            "summary": {"total_cash": 1000.0, "buying_power": 900.0, "currency": "EUR"}
-        }
-        mock.get_holdings.return_value = [
-            {"ticker": "US0378331005", "name": "Apple", "quantity": 5, "profit_loss": 12.3}
-        ]
-        mock.get_ticker_details.return_value = {
-            "ticker": "US0378331005",
-            "instrument": {"name": "Apple"},
-            "position": {"quantity": 5},
-        }
-        return mock
-
     async def test_get_account_summary_via_call_tool(self):
-        mock = self._mock_client()
+        mock = _mock_client()
         mcp_server = _patch_client(mock)
         result = await mcp_server.mcp.call_tool("get_account_summary", {})
         self.assertTrue(result)
-        mock.get_balance_info.assert_called_once()
+        mock.get_balance_info.assert_awaited_once()
 
     async def test_list_active_positions_via_call_tool(self):
-        mock = self._mock_client()
+        mock = _mock_client()
         mcp_server = _patch_client(mock)
         result = await mcp_server.mcp.call_tool("list_active_positions", {})
         self.assertTrue(result)
-        mock.get_holdings.assert_called_once()
+        mock.get_holdings.assert_awaited_once()
 
     async def test_get_position_details_validates_ticker(self):
-        mock = self._mock_client()
+        mock = _mock_client()
         mcp_server = _patch_client(mock)
         await mcp_server.mcp.call_tool("get_position_details", {"ticker": "US0378331005"})
-        mock.get_ticker_details.assert_called_once_with("US0378331005")
+        mock.get_ticker_details.assert_awaited_once_with("US0378331005")
 
     async def test_api_error_returns_structured_message(self):
-        mock = MagicMock()
         mcp_server = _fresh_import_mcp_server()
-        import tr_client
+        error_cls = mcp_server.TradeRepublicClientError
 
-        mock.get_balance_info.side_effect = tr_client.TradeRepublicClientError(
-            "Session expired or invalid TR_TOKEN.", retryable=True
+        mock = MagicMock()
+        mock.get_balance_info = AsyncMock(
+            side_effect=error_cls(
+                "Session expired or invalid TR_TOKEN.", retryable=True
+            )
         )
         mcp_server._client = mock
         with self.assertRaises(Exception) as ctx:
@@ -130,15 +133,15 @@ class StdioSmokeTest(unittest.IsolatedAsyncioTestCase):
         from mcp import ClientSession, StdioServerParameters
         from mcp.client.stdio import stdio_client
 
-        bootstrap = f"""
-import os
-from unittest.mock import MagicMock, patch
+        bootstrap = """
+import os, sys
+from unittest.mock import AsyncMock, MagicMock, patch
 
 os.environ.setdefault("TR_TOKEN", "offline-test-token")
 mock = MagicMock()
-mock.get_balance_info.return_value = {{
-    "summary": {{"total_cash": 123.45, "buying_power": 100.0, "currency": "EUR"}}
-}}
+mock.get_balance_info = AsyncMock(return_value={
+    "summary": {"total_cash": 123.45, "buying_power": 100.0, "currency": "EUR"}
+})
 patch("mcp_server.get_client", return_value=mock).start()
 
 from mcp_server import mcp
