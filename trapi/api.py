@@ -111,8 +111,13 @@ class TRApi:
             if "Chrome/" in ua:
                 chrome = ua.split("Chrome/", 1)[1].split(" ")[0]
             offset = datetime.now().astimezone().utcoffset()
+            device_name = os.environ.get(
+                "TR_DEVICE_NAME",
+                f"{platform.node() or 'Unknown'} (Hermes MCP)",
+            )
             device = {
                 "stableDeviceId": self._stable_device_id(),
+                "deviceName": device_name,
                 "browser": "Chrome",
                 "browserVersion": chrome or "",
                 "os": platform.system(),
