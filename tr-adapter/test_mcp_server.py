@@ -29,6 +29,7 @@ def _fresh_import_mcp_server():
             "mcp_write",
             "redact",
             "session",
+            "errors",
         } or name.startswith("mcp_server."):
             del sys.modules[name]
     import mcp_server
@@ -95,6 +96,16 @@ def _mock_client() -> MagicMock:
         "transactions": [{"type": "timelineEvent", "title": "Buy"}],
     })
     mock.instrument_label = AsyncMock(return_value="Apple Inc.")
+    mock.get_adapter_status = MagicMock(
+        return_value={
+            "status": "cold",
+            "session_ready": False,
+            "write_enabled": False,
+            "auth_circuit_open": False,
+            "retry_after_seconds": None,
+            "guidance": "test",
+        }
+    )
     mock.add_to_watchlist = AsyncMock(return_value={
         "status": "completed",
         "action": "add_to_watchlist",
@@ -211,19 +222,41 @@ class McpToolsTest(unittest.IsolatedAsyncioTestCase):
         mock.get_crypto_analysis.assert_awaited_once_with("XC000A2P6LJ6", include_position=False)
 
     async def test_api_error_returns_structured_message(self):
+        import json
+
         mcp_server = _fresh_import_mcp_server()
         error_cls = mcp_server.TradeRepublicClientError
+        from session import ErrorKind
 
         mock = MagicMock()
         mock.get_balance_info = AsyncMock(
             side_effect=error_cls(
-                "Session expired or invalid TR_TOKEN.", retryable=True
+                "Session expired or invalid TR_TOKEN.",
+                retryable=True,
+                kind=ErrorKind.SESSION_EXPIRED,
+                retry_after_seconds=60,
             )
         )
         mcp_server._client = mock
         with self.assertRaises(Exception) as ctx:
             await mcp_server.mcp.call_tool("get_account_summary", {})
-        self.assertIn("session problem", str(ctx.exception).lower())
+        text = str(ctx.exception)
+        self.assertIn("session_expired", text)
+        # Prefer parseable JSON payload for Hermes.
+        start = text.find("{")
+        self.assertGreaterEqual(start, 0)
+        payload = json.loads(text[start : text.rfind("}") + 1])
+        self.assertEqual(payload["code"], "session_expired")
+        self.assertEqual(payload["retry_after_seconds"], 60)
+        self.assertIn("guidance", payload)
+
+    async def test_get_adapter_status(self):
+        mock = _mock_client()
+        mcp_server = _patch_client(mock)
+        result = await mcp_server.mcp.call_tool("get_adapter_status", {})
+        mock.get_adapter_status.assert_called_once()
+        text = "".join(block.text for block in result if hasattr(block, "text"))
+        self.assertIn("cold", text)
 
     async def test_search_instruments(self):
         mock = _mock_client()
@@ -279,7 +312,8 @@ class WatchlistWriteTest(unittest.IsolatedAsyncioTestCase):
         with patch.dict(os.environ, {"TR_MCP_WRITE_ENABLED": ""}, clear=False):
             with self.assertRaises(Exception) as ctx:
                 await mcp_server.mcp.call_tool("add_to_watchlist", {"ticker": "US0378331005"})
-        self.assertIn("write tools disabled", str(ctx.exception).lower())
+        self.assertIn("writes_disabled", str(ctx.exception))
+        self.assertIn("write tools are disabled", str(ctx.exception).lower())
         mock.add_to_watchlist.assert_not_called()
 
     async def test_add_requires_confirmation(self):
