@@ -84,6 +84,9 @@ def _mock_client() -> MagicMock:
         "count": 1,
         "transactions": [{"type": "timelineEvent", "title": "Buy"}],
     })
+    mock.instrument_label = AsyncMock(return_value="Apple Inc.")
+    mock.add_to_watchlist = AsyncMock(return_value={"status": "completed", "ticker": "US0378331005"})
+    mock.remove_from_watchlist = AsyncMock(return_value={"status": "completed", "ticker": "US0378331005"})
     return mock
 
 
@@ -170,6 +173,20 @@ class RootMcpServerTest(unittest.IsolatedAsyncioTestCase):
         mcp_server = _patch_client(mock)
         await mcp_server.mcp.call_tool("get_recent_transactions", {"limit": 5})
         mock.get_recent_transactions.assert_awaited_once_with(limit=5, after=None)
+
+    async def test_add_to_watchlist_confirmation(self):
+        from unittest.mock import patch
+
+        mock = _mock_client()
+        mcp_server = _patch_client(mock)
+        with patch.dict(os.environ, {"TR_MCP_WRITE_ENABLED": "1"}):
+            result = await mcp_server.mcp.call_tool(
+                "add_to_watchlist",
+                {"ticker": "US0378331005", "confirmed": False},
+            )
+        mock.add_to_watchlist.assert_not_called()
+        text = "".join(block.text for block in result if hasattr(block, "text"))
+        self.assertIn("confirmation_required", text)
 
     def test_ticker_validation(self):
         mcp_server = _fresh_import_mcp_server()

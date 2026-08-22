@@ -23,6 +23,7 @@ if str(_ADAPTER_DIR) not in sys.path:
     sys.path.insert(0, str(_ADAPTER_DIR))
 
 from tr_client import TradeRepublicClient, TradeRepublicClientError  # noqa: E402
+from mcp_write import WriteToolsDisabledError, confirmation_required, require_write_enabled  # noqa: E402
 
 F = TypeVar("F", bound=Callable[..., Any])
 
@@ -149,6 +150,8 @@ def log_tool_call(name: str) -> Callable[[F], F]:
 
 
 def _format_error(exc: Exception) -> str:
+    if isinstance(exc, WriteToolsDisabledError):
+        return f"Trade Republic write tools disabled: {exc}"
     if isinstance(exc, TradeRepublicClientError):
         prefix = (
             "Trade Republic session problem"
@@ -401,6 +404,71 @@ async def get_recent_transactions(limit: int = 20, after: str | None = None) -> 
         return await get_client().get_recent_transactions(
             limit=validated.limit,
             after=validated.after,
+        )
+    except Exception as exc:
+        raise RuntimeError(_format_error(exc)) from exc
+
+
+async def _watchlist_mutation(
+    action: str,
+    ticker: str,
+    confirmed: bool,
+    mutate,
+) -> dict:
+    require_write_enabled()
+    validated = TickerInput(ticker=ticker)
+    client = get_client()
+    if not confirmed:
+        name = await client.instrument_label(validated.ticker)
+        return confirmation_required(action, validated.ticker, instrument_name=name)
+    return await mutate(validated.ticker)
+
+
+@mcp.tool()
+@log_tool_call("add_to_watchlist")
+async def add_to_watchlist(ticker: str, confirmed: bool = False) -> dict:
+    """Add an instrument to the Trade Republic watchlist.
+
+    MUTATING: Changes your watchlist only — does not buy or sell.
+
+    Workflow:
+    1. Call with confirmed=false (default) → returns confirmation_required and a
+       German prompt in 'message'. Ask the user explicitly.
+    2. After clear user consent, call again with confirmed=true to execute.
+
+    Requires TR_MCP_WRITE_ENABLED=1 and login credentials.
+    """
+    try:
+        return await _watchlist_mutation(
+            "add_to_watchlist",
+            ticker,
+            confirmed,
+            get_client().add_to_watchlist,
+        )
+    except Exception as exc:
+        raise RuntimeError(_format_error(exc)) from exc
+
+
+@mcp.tool()
+@log_tool_call("remove_from_watchlist")
+async def remove_from_watchlist(ticker: str, confirmed: bool = False) -> dict:
+    """Remove an instrument from the Trade Republic watchlist.
+
+    MUTATING: Changes your watchlist only — does not buy or sell.
+
+    Workflow:
+    1. Call with confirmed=false (default) → returns confirmation_required and a
+       German prompt in 'message'. Ask the user explicitly.
+    2. After clear user consent, call again with confirmed=true to execute.
+
+    Requires TR_MCP_WRITE_ENABLED=1 and login credentials.
+    """
+    try:
+        return await _watchlist_mutation(
+            "remove_from_watchlist",
+            ticker,
+            confirmed,
+            get_client().remove_from_watchlist,
         )
     except Exception as exc:
         raise RuntimeError(_format_error(exc)) from exc

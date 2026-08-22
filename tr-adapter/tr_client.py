@@ -429,6 +429,39 @@ class TradeRepublicClient:
         items = watchlist if isinstance(watchlist, list) else watchlist
         return {"watchlist": items}
 
+    async def add_to_watchlist(self, ticker: str) -> dict[str, Any]:
+        """Add an ISIN to the account watchlist (mutating, login required)."""
+        isin = self._normalize_isin(ticker)
+        result = await self._query_auth(self._api.add_to_watchlist(isin))
+        return {
+            "status": "completed",
+            "action": "add_to_watchlist",
+            "ticker": isin,
+            "result": result,
+        }
+
+    async def remove_from_watchlist(self, ticker: str) -> dict[str, Any]:
+        """Remove an ISIN from the account watchlist (mutating, login required)."""
+        isin = self._normalize_isin(ticker)
+        result = await self._query_auth(self._api.remove_from_watchlist(isin))
+        return {
+            "status": "completed",
+            "action": "remove_from_watchlist",
+            "ticker": isin,
+            "result": result,
+        }
+
+    async def instrument_label(self, ticker: str) -> str | None:
+        """Best-effort instrument name for confirmation prompts."""
+        isin = self._normalize_isin(ticker)
+        try:
+            data = await self._query_public(self._api.instrument(isin))
+            if isinstance(data, dict):
+                return data.get("name") or data.get("shortName")
+        except TradeRepublicClientError:
+            return None
+        return None
+
     @staticmethod
     def _extract_timeline_items(payload: Any) -> list[Any]:
         if isinstance(payload, list):
