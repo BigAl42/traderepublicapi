@@ -108,6 +108,19 @@ class PriceHistoryInput(BaseModel):
     exchange: str = Field(default="LSX", description="Exchange: LSX, TDG, LUS, TUB, BHS, B2C")
 
 
+class PortfolioHistoryInput(BaseModel):
+    """Parameters for portfolio aggregate history."""
+
+    range: str = Field(default="max", description="Time range: 1d, 5d, 1m, 3m, 1y, max")
+
+
+class TransactionsInput(BaseModel):
+    """Parameters for recent timeline transactions."""
+
+    limit: int = Field(default=20, ge=1, le=100, description="Max number of events to return")
+    after: str | None = Field(default=None, description="Optional pagination cursor")
+
+
 def log_tool_call(name: str) -> Callable[[F], F]:
     def decorator(func: F) -> F:
         if asyncio.iscoroutinefunction(func):
@@ -345,6 +358,57 @@ async def get_stock_news(ticker: str) -> dict:
     try:
         validated = TickerInput(ticker=ticker)
         return await get_client().get_stock_news(validated.ticker)
+    except Exception as exc:
+        raise RuntimeError(_format_error(exc)) from exc
+
+
+@mcp.tool()
+@log_tool_call("get_portfolio_history")
+async def get_portfolio_history(range: str = "max") -> dict:
+    """Return portfolio value history over time for the logged-in account.
+
+    Useful for performance charts and depot development questions. Requires login. Read-only.
+
+    Args:
+        range: Time window — 1d, 5d, 1m, 3m, 1y, or max.
+    """
+    try:
+        validated = PortfolioHistoryInput(range=range)
+        return await get_client().get_portfolio_history(validated.range)
+    except Exception as exc:
+        raise RuntimeError(_format_error(exc)) from exc
+
+
+@mcp.tool()
+@log_tool_call("get_watchlist")
+async def get_watchlist() -> dict:
+    """Return instruments on the account watchlist.
+
+    Requires login. Read-only.
+    """
+    try:
+        return await get_client().get_watchlist()
+    except Exception as exc:
+        raise RuntimeError(_format_error(exc)) from exc
+
+
+@mcp.tool()
+@log_tool_call("get_recent_transactions")
+async def get_recent_transactions(limit: int = 20, after: str | None = None) -> dict:
+    """Return recent account transactions (trades, dividends, deposits, etc.).
+
+    Uses the cash-relevant timeline subset. Requires login. Read-only.
+
+    Args:
+        limit: Maximum number of events to return (1–100, default 20).
+        after: Optional pagination cursor for older events.
+    """
+    try:
+        validated = TransactionsInput(limit=limit, after=after)
+        return await get_client().get_recent_transactions(
+            limit=validated.limit,
+            after=validated.after,
+        )
     except Exception as exc:
         raise RuntimeError(_format_error(exc)) from exc
 
