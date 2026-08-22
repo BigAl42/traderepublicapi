@@ -143,6 +143,93 @@ class TradeRepublicClient:
             )
         return TradeRepublicClientError(f"Trade Republic API error: {message}", retryable=True)
 
+    async def _query_auth(self, coro: Any) -> Any:
+        """Authenticated WebSocket query (login required)."""
+        self._ensure_session()
+        try:
+            return await self._query(coro)
+        except (TRapiException, TRapiExcServerErrorState) as exc:
+            raise self._map_error(exc) from exc
+
+    async def _try_query_auth(self, coro: Any) -> Any | None:
+        """Authenticated query; returns None when TR has no data for this field."""
+        try:
+            return await self._query_auth(coro)
+        except TradeRepublicClientError:
+            return None
+
+    @staticmethod
+    def _normalize_isin(ticker: str) -> str:
+        return ticker.strip().upper()
+
+    async def _find_position(self, isin: str) -> dict[str, Any] | None:
+        if not self._has_credentials:
+            return None
+        holdings = await self.get_holdings()
+        return next((h for h in holdings if h.get("ticker") == isin), None)
+
+    async def get_stock_analysis(
+        self,
+        ticker: str,
+        *,
+        include_position: bool = False,
+    ) -> dict[str, Any]:
+        """Fundamental stock analysis: details, KPIs, dividends, performance."""
+        isin = self._normalize_isin(ticker)
+        instrument = await self._query_auth(self._api.instrument(isin))
+        details = await self._query_auth(self._api.stock_details(isin))
+        kpis = await self._try_query_auth(self._api.stock_detail_kpis(isin))
+        dividends = await self._try_query_auth(self._api.stock_detail_dividends(isin))
+        performance = await self._try_query_auth(self._api.performance(isin))
+        position = await self._find_position(isin) if include_position else None
+        return {
+            "ticker": isin,
+            "instrument": instrument,
+            "details": details,
+            "kpis": kpis,
+            "dividends": dividends,
+            "performance": performance,
+            "position": position,
+        }
+
+    async def get_etf_analysis(
+        self,
+        ticker: str,
+        *,
+        include_position: bool = False,
+    ) -> dict[str, Any]:
+        """ETF analysis: details and portfolio composition."""
+        isin = self._normalize_isin(ticker)
+        instrument = await self._query_auth(self._api.instrument(isin))
+        details = await self._query_auth(self._api.etf_details(isin))
+        composition = await self._try_query_auth(self._api.etf_composition(isin))
+        position = await self._find_position(isin) if include_position else None
+        return {
+            "ticker": isin,
+            "instrument": instrument,
+            "details": details,
+            "composition": composition,
+            "position": position,
+        }
+
+    async def get_crypto_analysis(
+        self,
+        ticker: str,
+        *,
+        include_position: bool = False,
+    ) -> dict[str, Any]:
+        """Crypto asset analysis."""
+        isin = self._normalize_isin(ticker)
+        instrument = await self._query_auth(self._api.instrument(isin))
+        details = await self._query_auth(self._api.crypto_details(isin))
+        position = await self._find_position(isin) if include_position else None
+        return {
+            "ticker": isin,
+            "instrument": instrument,
+            "details": details,
+            "position": position,
+        }
+
     async def _query_public(self, coro: Any) -> Any:
         """WebSocket query that does not require a logged-in session."""
         try:
@@ -313,27 +400,13 @@ class TradeRepublicClient:
                 positions.append(item)
         return positions
 
-    async def get_ticker_details(self, ticker: str) -> dict[str, Any]:
-        """Instrument and stock details for one ISIN/ticker."""
-        self._ensure_session()
-        isin = ticker.strip().upper()
-        try:
-            instrument = await self._query(self._api.instrument(isin))
-            details = await self._query(self._api.stock_details(isin))
-            performance = None
-            try:
-                performance = await self._query(self._api.performance(isin))
-            except (TRapiException, TRapiExcServerErrorState):
-                performance = None
-        except (TRapiException, TRapiExcServerErrorState) as exc:
-            raise self._map_error(exc) from exc
-
-        holding = next((h for h in await self.get_holdings() if h.get("ticker") == isin), None)
-
+    async def get_ticker_details(self, ticker: str, *, include_position: bool = True) -> dict[str, Any]:
+        """Instrument summary for one ISIN; includes portfolio line when held."""
+        analysis = await self.get_stock_analysis(ticker, include_position=include_position)
         return {
-            "ticker": isin,
-            "instrument": instrument,
-            "stock_details": details,
-            "performance": performance,
-            "position": holding,
+            "ticker": analysis["ticker"],
+            "instrument": analysis["instrument"],
+            "stock_details": analysis["details"],
+            "performance": analysis["performance"],
+            "position": analysis["position"],
         }

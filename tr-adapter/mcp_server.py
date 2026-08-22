@@ -196,7 +196,71 @@ async def get_position_details(ticker: str) -> dict:
     """
     try:
         validated = TickerInput(ticker=ticker)
-        return await get_client().get_ticker_details(validated.ticker)
+        return await get_client().get_ticker_details(validated.ticker, include_position=True)
+    except Exception as exc:
+        raise RuntimeError(_format_error(exc)) from exc
+
+
+@mcp.tool()
+@log_tool_call("get_stock_analysis")
+async def get_stock_analysis(ticker: str, include_position: bool = False) -> dict:
+    """Return deep fundamental analysis for a stock ISIN.
+
+    Includes company details, annual KPIs, dividend history, and performance.
+    Works for any stock, not only portfolio holdings. Requires login. Read-only.
+
+    Args:
+        ticker: ISIN (e.g. US0378331005 for Apple).
+        include_position: When true, also attach the portfolio line if this ISIN is held.
+    """
+    try:
+        validated = TickerInput(ticker=ticker)
+        return await get_client().get_stock_analysis(
+            validated.ticker,
+            include_position=include_position,
+        )
+    except Exception as exc:
+        raise RuntimeError(_format_error(exc)) from exc
+
+
+@mcp.tool()
+@log_tool_call("get_etf_analysis")
+async def get_etf_analysis(ticker: str, include_position: bool = False) -> dict:
+    """Return ETF details and portfolio composition for an ISIN.
+
+    Requires login. Read-only.
+
+    Args:
+        ticker: ISIN of the ETF (e.g. IE00B4L5Y983 for iShares Core MSCI World).
+        include_position: When true, also attach the portfolio line if held.
+    """
+    try:
+        validated = TickerInput(ticker=ticker)
+        return await get_client().get_etf_analysis(
+            validated.ticker,
+            include_position=include_position,
+        )
+    except Exception as exc:
+        raise RuntimeError(_format_error(exc)) from exc
+
+
+@mcp.tool()
+@log_tool_call("get_crypto_analysis")
+async def get_crypto_analysis(ticker: str, include_position: bool = False) -> dict:
+    """Return crypto asset details for an ISIN.
+
+    Requires login. Read-only.
+
+    Args:
+        ticker: ISIN of the crypto instrument.
+        include_position: When true, also attach the portfolio line if held.
+    """
+    try:
+        validated = TickerInput(ticker=ticker)
+        return await get_client().get_crypto_analysis(
+            validated.ticker,
+            include_position=include_position,
+        )
     except Exception as exc:
         raise RuntimeError(_format_error(exc)) from exc
 
