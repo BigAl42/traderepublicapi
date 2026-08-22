@@ -87,6 +87,17 @@ def _mock_client() -> MagicMock:
         "count": 1,
         "transactions": [{"type": "timelineEvent", "title": "Buy"}],
     })
+    mock.instrument_label = AsyncMock(return_value="Apple Inc.")
+    mock.add_to_watchlist = AsyncMock(return_value={
+        "status": "completed",
+        "action": "add_to_watchlist",
+        "ticker": "US0378331005",
+    })
+    mock.remove_from_watchlist = AsyncMock(return_value={
+        "status": "completed",
+        "action": "remove_from_watchlist",
+        "ticker": "US0378331005",
+    })
     return mock
 
 
@@ -248,6 +259,63 @@ class McpToolsTest(unittest.IsolatedAsyncioTestCase):
         mcp_server = _patch_client(mock)
         await mcp_server.mcp.call_tool("get_recent_transactions", {"limit": 10})
         mock.get_recent_transactions.assert_awaited_once_with(limit=10, after=None)
+
+
+class WatchlistWriteTest(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _tool_text(result) -> str:
+        return "".join(block.text for block in result if hasattr(block, "text"))
+
+    async def test_add_blocked_without_write_flag(self):
+        mock = _mock_client()
+        mcp_server = _patch_client(mock)
+        with patch.dict(os.environ, {"TR_MCP_WRITE_ENABLED": ""}, clear=False):
+            with self.assertRaises(Exception) as ctx:
+                await mcp_server.mcp.call_tool("add_to_watchlist", {"ticker": "US0378331005"})
+        self.assertIn("write tools disabled", str(ctx.exception).lower())
+        mock.add_to_watchlist.assert_not_called()
+
+    async def test_add_requires_confirmation(self):
+        mock = _mock_client()
+        mcp_server = _patch_client(mock)
+        with patch.dict(os.environ, {"TR_MCP_WRITE_ENABLED": "1"}):
+            result = await mcp_server.mcp.call_tool(
+                "add_to_watchlist",
+                {"ticker": "US0378331005", "confirmed": False},
+            )
+        mock.add_to_watchlist.assert_not_called()
+        self.assertIn("confirmation_required", self._tool_text(result))
+        self.assertIn("US0378331005", self._tool_text(result))
+
+    async def test_add_executes_after_confirmation(self):
+        mock = _mock_client()
+        mcp_server = _patch_client(mock)
+        with patch.dict(os.environ, {"TR_MCP_WRITE_ENABLED": "1"}):
+            await mcp_server.mcp.call_tool(
+                "add_to_watchlist",
+                {"ticker": "US0378331005", "confirmed": True},
+            )
+        mock.add_to_watchlist.assert_awaited_once_with("US0378331005")
+
+    async def test_remove_executes_after_confirmation(self):
+        mock = _mock_client()
+        mcp_server = _patch_client(mock)
+        with patch.dict(os.environ, {"TR_MCP_WRITE_ENABLED": "1"}):
+            await mcp_server.mcp.call_tool(
+                "remove_from_watchlist",
+                {"ticker": "US0378331005", "confirmed": True},
+            )
+        mock.remove_from_watchlist.assert_awaited_once_with("US0378331005")
+
+
+class McpWriteHelpersTest(unittest.TestCase):
+    def test_confirmation_message_add(self):
+        from mcp_write import confirmation_required
+
+        payload = confirmation_required("add_to_watchlist", "US0378331005", instrument_name="Apple")
+        self.assertEqual(payload["status"], "confirmation_required")
+        self.assertIn("Apple", payload["message"])
+        self.assertIn("US0378331005", payload["message"])
 
 
 class StdioSmokeTest(unittest.IsolatedAsyncioTestCase):
