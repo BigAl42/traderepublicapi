@@ -6,6 +6,7 @@ trapi/.venv
 key
 tr_cookies.txt
 *.cookies.txt
+*.auth_circuit.json
 
 # Python
 __pycache__

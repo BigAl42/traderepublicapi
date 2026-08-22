@@ -153,12 +153,19 @@ def _format_error(exc: Exception) -> str:
     if isinstance(exc, WriteToolsDisabledError):
         return f"Trade Republic write tools disabled: {exc}"
     if isinstance(exc, TradeRepublicClientError):
-        prefix = (
-            "Trade Republic session problem"
-            if exc.retryable
-            else "Trade Republic configuration problem"
-        )
-        return f"{prefix}: {exc}"
+        kind = getattr(exc, "kind", None)
+        kind_value = getattr(kind, "value", None) or "unknown"
+        if kind_value == "rate_limited":
+            prefix = "Trade Republic rate limit"
+        elif exc.retryable:
+            prefix = "Trade Republic session problem"
+        else:
+            prefix = "Trade Republic configuration problem"
+        message = f"{prefix} [{kind_value}]: {exc}"
+        retry_after = getattr(exc, "retry_after_seconds", None)
+        if retry_after:
+            message = f"{message} (retry_after_seconds={retry_after})"
+        return message
     return f"Unexpected adapter error: {exc}"
 
 

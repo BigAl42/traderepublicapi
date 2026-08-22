@@ -1,8 +1,15 @@
-"""Read-only Trade Republic client wrapper for the MCP adapter.
+"""Trade Republic client wrapper for the MCP adapter.
 
 Uses TRApi (async) directly so all data methods can be awaited inside the
-MCP server's event loop — avoids the ``RuntimeError: This event loop is
-already running`` that TrBlockingApi triggers via ``run_until_complete``.
+MCP server's already-running event loop — avoids the ``RuntimeError: This
+event loop is already running`` that TrBlockingApi triggers via
+``run_until_complete``.
+
+Session policy (professional):
+- Cookie / TR_TOKEN first, push-login last
+- File-backed auth circuit breaker across Hermes process restarts
+- Soft session refresh before mutating calls
+- No login storms on rate-limit errors
 
 Credentials come from environment variables only (see .env.example).
 """
@@ -10,6 +17,7 @@ Credentials come from environment variables only (see .env.example).
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import sys
 from http.cookiejar import Cookie
@@ -22,22 +30,46 @@ if str(ROOT) not in sys.path:
 
 from trapi.api import TRApi, TRapiException, TRapiExcServerErrorState  # noqa: E402
 
+from session import (  # noqa: E402
+    AuthCircuitBreaker,
+    ClassifiedError,
+    ErrorKind,
+    SessionBlockedError,
+    circuit_state_path_for_cookies,
+    classify_auth_error,
+)
+
+LOGGER = logging.getLogger("tr_adapter.client")
+
 
 class TradeRepublicClientError(Exception):
     """Human-readable adapter error for MCP tools."""
 
-    def __init__(self, message: str, *, retryable: bool = False):
+    def __init__(
+        self,
+        message: str,
+        *,
+        retryable: bool = False,
+        kind: ErrorKind = ErrorKind.UNKNOWN,
+        retry_after_seconds: int | None = None,
+    ):
         super().__init__(message)
         self.retryable = retryable
+        self.kind = kind
+        self.retry_after_seconds = retry_after_seconds
+
+    @classmethod
+    def from_classified(cls, classified: ClassifiedError) -> TradeRepublicClientError:
+        return cls(
+            classified.message,
+            retryable=classified.retryable,
+            kind=classified.kind,
+            retry_after_seconds=classified.retry_after_seconds,
+        )
 
 
 class TradeRepublicClient:
-    """Async read-only facade over TRApi for Hermes / MCP.
-
-    All data methods are ``async`` so they work inside the MCP server's
-    already-running event loop.  Login is synchronous (HTTP via requests)
-    and is called once before the first WebSocket subscription.
-    """
+    """Async facade over TRApi for Hermes / MCP with hardened session handling."""
 
     def __init__(self, token: str | None = None):
         self._token = token or os.getenv("TR_TOKEN")
@@ -47,6 +79,9 @@ class TradeRepublicClient:
         cookies_file = os.getenv("TR_COOKIES_FILE", "tr_cookies.txt")
         self._timeout = float(os.getenv("TR_TIMEOUT", "20"))
         self._has_credentials = bool(self._token or (phone and pin))
+        self._allow_interactive_login = os.getenv(
+            "TR_MCP_ALLOW_INTERACTIVE_LOGIN", "1"
+        ).strip().lower() in ("1", "true", "yes")
 
         self._api = TRApi(
             phone or "+0000000000",
@@ -56,6 +91,9 @@ class TradeRepublicClient:
             auth="web",
         )
         self._session_ready = False
+        self._circuit = AuthCircuitBreaker(
+            circuit_state_path_for_cookies(self._api.cookies_file)
+        )
 
     def _inject_token_on_api(self) -> None:
         if not self._token:
@@ -81,75 +119,169 @@ class TradeRepublicClient:
         self._api.session.cookies.set_cookie(cookie)
         self._api.sessionToken = self._token
 
-    def _ensure_session(self) -> None:
-        """Synchronous login / session resume (uses requests, no event loop)."""
+    def _persist_cookies(self) -> None:
+        try:
+            self._api._save_cookies()
+        except Exception as exc:  # noqa: BLE001 — persistence must never crash callers
+            LOGGER.warning("Could not persist TR cookies: %s", exc)
+
+    def _invalidate_session(self) -> None:
+        self._session_ready = False
+
+    def _map_error(self, exc: Exception) -> TradeRepublicClientError:
+        if isinstance(exc, SessionBlockedError):
+            return TradeRepublicClientError(
+                str(exc),
+                retryable=False,
+                kind=exc.kind,
+                retry_after_seconds=exc.retry_after_seconds,
+            )
+        if isinstance(exc, TradeRepublicClientError):
+            return exc
+        classified = classify_auth_error(exc)
+        if classified.kind in {
+            ErrorKind.RATE_LIMITED,
+            ErrorKind.AUTH_FAILED,
+            ErrorKind.SESSION_EXPIRED,
+        }:
+            self._circuit.record_failure(classified)
+            self._invalidate_session()
+        return TradeRepublicClientError.from_classified(classified)
+
+    def _try_resume(self) -> bool:
+        """Cookie/token resume only — never starts a push login."""
+        if self._token:
+            self._inject_token_on_api()
+        if self._api._resume_web_session():
+            self._persist_cookies()
+            self._session_ready = True
+            self._circuit.record_success()
+            LOGGER.info("Resumed Trade Republic session from cookies/token")
+            return True
+        return False
+
+    def _interactive_login(self) -> None:
+        if not self._allow_interactive_login:
+            raise TradeRepublicClientError(
+                "Interactive login is disabled (TR_MCP_ALLOW_INTERACTIVE_LOGIN=0). "
+                "Provide a valid TR_TOKEN or warm tr_cookies.txt offline via check_login.py.",
+                retryable=False,
+                kind=ErrorKind.LOGIN_REQUIRED,
+            )
+        if not os.getenv("TR_PHONE") or not os.getenv("TR_PIN"):
+            raise TradeRepublicClientError(
+                "Session expired or invalid TR_TOKEN. Set TR_PHONE and TR_PIN, "
+                "then confirm the app push on login — or wait and reuse cookies.",
+                retryable=True,
+                kind=ErrorKind.LOGIN_REQUIRED,
+            )
+        LOGGER.info("Starting interactive Trade Republic web login (push confirm)")
+        self._api.login(resume=False)
+        self._persist_cookies()
+        self._session_ready = True
+        self._circuit.record_success()
+
+    def _ensure_session(self, *, allow_login: bool = True) -> None:
+        """Ensure a usable web session.
+
+        Cookie-first. Interactive login only when allow_login=True and circuit is closed.
+        """
         if self._session_ready:
             return
         if not self._has_credentials:
             raise TradeRepublicClientError(
                 "Missing credentials. Set TR_TOKEN (session) or TR_PHONE and TR_PIN in the environment.",
                 retryable=False,
+                kind=ErrorKind.CONFIG,
             )
+
+        self._circuit.guard()
+
         try:
-            if self._token:
-                self._inject_token_on_api()
-            if self._api._resume_web_session():
-                self._session_ready = True
+            if self._try_resume():
                 return
-            if not os.getenv("TR_PHONE") or not os.getenv("TR_PIN"):
+            if not allow_login:
                 raise TradeRepublicClientError(
-                    "Session expired or invalid TR_TOKEN. Set TR_PHONE and TR_PIN, then confirm the app push on login.",
+                    "No warm Trade Republic session available for this action. "
+                    "Refresh cookies offline with check_login.py, set TR_TOKEN, "
+                    "and avoid write calls during auth cooldown.",
                     retryable=True,
+                    kind=ErrorKind.LOGIN_REQUIRED,
                 )
-            self._api.login(resume=False)
-            self._session_ready = True
+            self._interactive_login()
+        except SessionBlockedError as exc:
+            raise self._map_error(exc) from exc
         except TRapiException as exc:
             raise self._map_error(exc) from exc
 
-    async def _query(self, coro: Any) -> Any:
-        """Fire one async subscription and wait for a single response.
+    def _soft_refresh_session(self) -> bool:
+        """Refresh web session endpoint without triggering login."""
+        try:
+            response = self._api._refresh_web_session()
+            if getattr(response, "status_code", 500) >= 400:
+                return False
+            data = self._api.refresh_account_settings()
+            if data is None:
+                return False
+            self._persist_cookies()
+            self._session_ready = True
+            return True
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.info("Soft session refresh failed: %s", exc)
+            return False
 
-        Equivalent to ``TrBlockingApi.get_one`` but without
-        ``run_until_complete`` — safe inside a running loop.
-        """
+    def _ensure_session_for_write(self) -> None:
+        """Warm session for mutating calls — resume + soft refresh, no login storm."""
+        self._circuit.guard()
+        if self._session_ready:
+            if self._soft_refresh_session():
+                return
+            self._invalidate_session()
+
+        self._ensure_session(allow_login=False)
+        if not self._soft_refresh_session():
+            self._invalidate_session()
+            raise TradeRepublicClientError(
+                "Session is not warm enough for mutating Trade Republic actions. "
+                "Wait out any auth cooldown, refresh TR_TOKEN/cookies with check_login.py, "
+                "then retry once.",
+                retryable=True,
+                kind=ErrorKind.SESSION_EXPIRED,
+                retry_after_seconds=self._circuit.remaining_cooldown_seconds() or 60,
+            )
+
+    async def _query(self, coro: Any) -> Any:
+        """Fire one async subscription and wait for a single response."""
         await coro
         return await asyncio.wait_for(
             self._api.start(receive_one=True), timeout=self._timeout
         )
 
-    @staticmethod
-    def _map_error(exc: Exception) -> TradeRepublicClientError:
-        message = str(exc)
-        lower = message.lower()
-        if "not confirmed in time" in lower or "process_gone" in lower:
-            return TradeRepublicClientError(
-                "Login was not confirmed in the Trade Republic app in time. Retry and approve the push notification.",
-                retryable=True,
-            )
-        if "session" in lower or "401" in lower or "login failed" in lower:
-            return TradeRepublicClientError(
-                "Trade Republic session expired or invalid. Refresh TR_TOKEN or log in again with TR_PHONE/TR_PIN.",
-                retryable=True,
-            )
-        if isinstance(exc, TRapiExcServerErrorState):
-            return TradeRepublicClientError(
-                "Trade Republic websocket returned an error (subscription may have expired). Retry the request.",
-                retryable=True,
-            )
-        if "connection error" in lower or "timeout" in lower:
-            return TradeRepublicClientError(
-                "Could not reach Trade Republic (network or server issue). Try again later.",
-                retryable=True,
-            )
-        return TradeRepublicClientError(f"Trade Republic API error: {message}", retryable=True)
-
-    async def _query_auth(self, coro: Any) -> Any:
-        """Authenticated WebSocket query (login required)."""
-        self._ensure_session()
+    async def _query_auth(self, coro: Any, *, mutating: bool = False) -> Any:
+        """Authenticated WebSocket query."""
+        if mutating:
+            self._ensure_session_for_write()
+        else:
+            self._ensure_session(allow_login=True)
         try:
-            return await self._query(coro)
+            result = await self._query(coro)
+            if mutating:
+                self._persist_cookies()
+            return result
         except (TRapiException, TRapiExcServerErrorState) as exc:
-            raise self._map_error(exc) from exc
+            mapped = self._map_error(exc)
+            if (
+                not mutating
+                and mapped.kind in {ErrorKind.SESSION_EXPIRED, ErrorKind.SERVER}
+                and not self._circuit.is_open()
+            ):
+                self._invalidate_session()
+                try:
+                    if self._try_resume():
+                        return await self._query(coro)
+                except (TRapiException, TRapiExcServerErrorState) as retry_exc:
+                    raise self._map_error(retry_exc) from retry_exc
+            raise mapped from exc
 
     async def _try_query_auth(self, coro: Any) -> Any | None:
         """Authenticated query; returns None when TR has no data for this field."""
@@ -264,6 +396,7 @@ class TradeRepublicClient:
             raise TradeRepublicClientError(
                 f"instrument_type must be one of {self.INSTRUMENT_TYPES}",
                 retryable=False,
+                kind=ErrorKind.CONFIG,
             )
         results = await self._query_public(
             self._api.neon_search(
@@ -295,11 +428,13 @@ class TradeRepublicClient:
             raise TradeRepublicClientError(
                 f"range must be one of {self.RANGE_VALUES}",
                 retryable=False,
+                kind=ErrorKind.CONFIG,
             )
         if exchange not in self.EXCHANGES:
             raise TradeRepublicClientError(
                 f"exchange must be one of {self.EXCHANGES}",
                 retryable=False,
+                kind=ErrorKind.CONFIG,
             )
         history = await self._query_public(
             self._api.aggregate_history_light(isin, range=range, exchange=exchange)
@@ -329,14 +464,10 @@ class TradeRepublicClient:
 
     async def get_balance_info(self) -> dict[str, Any]:
         """Cash balances and buying power (read-only)."""
-        self._ensure_session()
-        try:
-            cash = await self._query(self._api.cash())
-            available = await self._query(self._api.available_cash())
-            payout = await self._query(self._api.available_cash_for_payout())
-            status = await self._query(self._api.portfolio_status())
-        except (TRapiException, TRapiExcServerErrorState) as exc:
-            raise self._map_error(exc) from exc
+        cash = await self._query_auth(self._api.cash())
+        available = await self._query_auth(self._api.available_cash())
+        payout = await self._query_auth(self._api.available_cash_for_payout())
+        status = await self._query_auth(self._api.portfolio_status())
 
         cash_accounts = self._unwrap_cash(cash)
         available_accounts = self._unwrap_cash(available)
@@ -372,11 +503,7 @@ class TradeRepublicClient:
         }
 
     async def _load_portfolio(self) -> dict[str, Any]:
-        self._ensure_session()
-        try:
-            return await self._query(self._api.compact_portfolio_by_type())
-        except (TRapiException, TRapiExcServerErrorState) as exc:
-            raise self._map_error(exc) from exc
+        return await self._query_auth(self._api.compact_portfolio_by_type())
 
     async def get_holdings(self) -> list[dict[str, Any]]:
         """All active portfolio positions."""
@@ -417,6 +544,7 @@ class TradeRepublicClient:
             raise TradeRepublicClientError(
                 f"range must be one of {self.RANGE_VALUES}",
                 retryable=False,
+                kind=ErrorKind.CONFIG,
             )
         history = await self._query_auth(
             self._api.portfolio_aggregate_history(range=range)
@@ -432,7 +560,7 @@ class TradeRepublicClient:
     async def add_to_watchlist(self, ticker: str) -> dict[str, Any]:
         """Add an ISIN to the account watchlist (mutating, login required)."""
         isin = self._normalize_isin(ticker)
-        result = await self._query_auth(self._api.add_to_watchlist(isin))
+        result = await self._query_auth(self._api.add_to_watchlist(isin), mutating=True)
         return {
             "status": "completed",
             "action": "add_to_watchlist",
@@ -443,7 +571,9 @@ class TradeRepublicClient:
     async def remove_from_watchlist(self, ticker: str) -> dict[str, Any]:
         """Remove an ISIN from the account watchlist (mutating, login required)."""
         isin = self._normalize_isin(ticker)
-        result = await self._query_auth(self._api.remove_from_watchlist(isin))
+        result = await self._query_auth(
+            self._api.remove_from_watchlist(isin), mutating=True
+        )
         return {
             "status": "completed",
             "action": "remove_from_watchlist",
@@ -483,6 +613,7 @@ class TradeRepublicClient:
             raise TradeRepublicClientError(
                 "limit must be between 1 and 100",
                 retryable=False,
+                kind=ErrorKind.CONFIG,
             )
         raw = await self._query_auth(self._api.timeline_transactions(after=after))
         items = self._extract_timeline_items(raw)
