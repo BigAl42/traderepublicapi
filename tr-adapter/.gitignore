@@ -1,6 +1,7 @@
 .env
 tr_cookies.txt
 *.cookies.txt
+*.auth_circuit.json
 __pycache__/
 *.pyc
 .venv/
