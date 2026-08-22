@@ -18,7 +18,14 @@ from pydantic.functional_validators import BeforeValidator
 from typing import Annotated
 
 from tr_client import TradeRepublicClient, TradeRepublicClientError
-from mcp_write import WriteToolsDisabledError, confirmation_required, require_write_enabled
+from mcp_write import (
+    ConfirmationError,
+    WriteToolsDisabledError,
+    confirmation_required,
+    require_confirmation,
+    require_write_enabled,
+)
+from redact import redact_secrets
 
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
@@ -37,16 +44,18 @@ def _setup_logging() -> logging.Logger:
     logger.setLevel(logging.INFO)
     formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
 
+    # Always log to stderr (Docker / local). Optionally also to a Hermes file path.
+    stream_handler = logging.StreamHandler(sys.stderr)
+    stream_handler.setFormatter(formatter)
+    logger.addHandler(stream_handler)
+
     try:
         Path(LOG_PATH).parent.mkdir(parents=True, exist_ok=True)
         file_handler = logging.FileHandler(LOG_PATH, encoding="utf-8")
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
     except OSError:
-        stream_handler = logging.StreamHandler(sys.stderr)
-        stream_handler.setFormatter(formatter)
-        logger.addHandler(stream_handler)
-        logger.warning("Could not open log file %s; logging to stderr", LOG_PATH)
+        logger.warning("Could not open log file %s; stderr only", LOG_PATH)
 
     return logger
 
@@ -138,7 +147,7 @@ def log_tool_call(name: str) -> Callable[[F], F]:
                         "tool=%s status=error timestamp=%s detail=%s",
                         name,
                         started,
-                        exc,
+                        redact_secrets(str(exc)),
                     )
                     raise
 
@@ -152,7 +161,12 @@ def log_tool_call(name: str) -> Callable[[F], F]:
                 LOGGER.info("tool=%s status=success timestamp=%s", name, started)
                 return result
             except Exception as exc:
-                LOGGER.info("tool=%s status=error timestamp=%s detail=%s", name, started, exc)
+                LOGGER.info(
+                    "tool=%s status=error timestamp=%s detail=%s",
+                    name,
+                    started,
+                    redact_secrets(str(exc)),
+                )
                 raise
 
         return sync_wrapper  # type: ignore[return-value]
@@ -163,6 +177,8 @@ def log_tool_call(name: str) -> Callable[[F], F]:
 def _format_error(exc: Exception) -> str:
     if isinstance(exc, WriteToolsDisabledError):
         return f"Trade Republic write tools disabled: {exc}"
+    if isinstance(exc, ConfirmationError):
+        return f"Trade Republic confirmation error: {exc}"
     if isinstance(exc, TradeRepublicClientError):
         kind = getattr(exc, "kind", None)
         kind_value = getattr(kind, "value", None) or "unknown"
@@ -172,12 +188,12 @@ def _format_error(exc: Exception) -> str:
             prefix = "Trade Republic session problem"
         else:
             prefix = "Trade Republic configuration problem"
-        message = f"{prefix} [{kind_value}]: {exc}"
+        message = f"{prefix} [{kind_value}]: {redact_secrets(str(exc))}"
         retry_after = getattr(exc, "retry_after_seconds", None)
         if retry_after:
             message = f"{message} (retry_after_seconds={retry_after})"
         return message
-    return f"Unexpected adapter error: {exc}"
+    return f"Unexpected adapter error: {redact_secrets(str(exc))}"
 
 
 @mcp.tool()
@@ -432,6 +448,7 @@ async def _watchlist_mutation(
     ticker: str,
     confirmed: bool,
     mutate,
+    confirm_token: str | None = None,
 ) -> dict:
     require_write_enabled()
     validated = TickerInput(ticker=ticker)
@@ -439,20 +456,26 @@ async def _watchlist_mutation(
     if not confirmed:
         name = await client.instrument_label(validated.ticker)
         return confirmation_required(action, validated.ticker, instrument_name=name)
+    require_confirmation(action, validated.ticker, confirm_token)
     return await mutate(validated.ticker)
 
 
 @mcp.tool()
 @log_tool_call("add_to_watchlist")
-async def add_to_watchlist(ticker: str, confirmed: bool = False) -> dict:
+async def add_to_watchlist(
+    ticker: str,
+    confirmed: bool = False,
+    confirm_token: str | None = None,
+) -> dict:
     """Add an instrument to the Trade Republic watchlist.
 
     MUTATING: Changes your watchlist only — does not buy or sell.
 
     Workflow:
-    1. Call with confirmed=false (default) → returns confirmation_required and a
-       German prompt in 'message'. Ask the user explicitly.
-    2. After clear user consent, call again with confirmed=true to execute.
+    1. Call with confirmed=false (default) → returns confirmation_required,
+       a German prompt in 'message', and a one-time confirm_token.
+    2. After clear user consent, call again with confirmed=true AND that
+       confirm_token to execute. Bare confirmed=true without the token is rejected.
 
     Requires TR_MCP_WRITE_ENABLED=1 and login credentials.
     """
@@ -462,6 +485,7 @@ async def add_to_watchlist(ticker: str, confirmed: bool = False) -> dict:
             ticker,
             confirmed,
             get_client().add_to_watchlist,
+            confirm_token=confirm_token,
         )
     except Exception as exc:
         raise RuntimeError(_format_error(exc)) from exc
@@ -469,15 +493,20 @@ async def add_to_watchlist(ticker: str, confirmed: bool = False) -> dict:
 
 @mcp.tool()
 @log_tool_call("remove_from_watchlist")
-async def remove_from_watchlist(ticker: str, confirmed: bool = False) -> dict:
+async def remove_from_watchlist(
+    ticker: str,
+    confirmed: bool = False,
+    confirm_token: str | None = None,
+) -> dict:
     """Remove an instrument from the Trade Republic watchlist.
 
     MUTATING: Changes your watchlist only — does not buy or sell.
 
     Workflow:
-    1. Call with confirmed=false (default) → returns confirmation_required and a
-       German prompt in 'message'. Ask the user explicitly.
-    2. After clear user consent, call again with confirmed=true to execute.
+    1. Call with confirmed=false (default) → returns confirmation_required,
+       a German prompt in 'message', and a one-time confirm_token.
+    2. After clear user consent, call again with confirmed=true AND that
+       confirm_token to execute. Bare confirmed=true without the token is rejected.
 
     Requires TR_MCP_WRITE_ENABLED=1 and login credentials.
     """
@@ -487,6 +516,7 @@ async def remove_from_watchlist(ticker: str, confirmed: bool = False) -> dict:
             ticker,
             confirmed,
             get_client().remove_from_watchlist,
+            confirm_token=confirm_token,
         )
     except Exception as exc:
         raise RuntimeError(_format_error(exc)) from exc

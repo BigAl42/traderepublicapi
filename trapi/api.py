@@ -150,7 +150,20 @@ class TRApi:
     def _save_cookies(self):
         try:
             self.cookies_file.parent.mkdir(parents=True, exist_ok=True)
-            self.session.cookies.save(ignore_discard=True, ignore_expires=True)
+            tmp = self.cookies_file.with_suffix(self.cookies_file.suffix + ".tmp")
+            jar = self.session.cookies
+            previous = getattr(jar, "filename", str(self.cookies_file))
+            jar.filename = str(tmp)
+            try:
+                jar.save(ignore_discard=True, ignore_expires=True)
+            finally:
+                jar.filename = previous
+            tmp.replace(self.cookies_file)
+            try:
+                os.chmod(self.cookies_file, 0o600)
+            except OSError:
+                pass
+            jar.filename = str(self.cookies_file)
         except OSError:
             pass
 
