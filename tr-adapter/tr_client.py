@@ -20,6 +20,7 @@ import asyncio
 import logging
 import os
 import sys
+import time
 from http.cookiejar import Cookie
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,7 @@ if str(ROOT) not in sys.path:
 
 from trapi.api import TRApi, TRapiException, TRapiExcServerErrorState  # noqa: E402
 
+from redact import redact_secrets  # noqa: E402
 from session import (  # noqa: E402
     AuthCircuitBreaker,
     ClassifiedError,
@@ -94,6 +96,8 @@ class TradeRepublicClient:
         self._circuit = AuthCircuitBreaker(
             circuit_state_path_for_cookies(self._api.cookies_file)
         )
+        self._last_read_at = 0.0
+        self._read_lock = asyncio.Lock()
 
     def _inject_token_on_api(self) -> None:
         if not self._token:
@@ -266,6 +270,22 @@ class TradeRepublicClient:
                 retry_after_seconds=self._circuit.remaining_cooldown_seconds() or 60,
             )
 
+    async def _throttle_read(self) -> None:
+        """Light spacing between authenticated reads to reduce reconnect storms."""
+        raw = os.getenv("TR_MCP_READ_MIN_INTERVAL_SEC", "0.15")
+        try:
+            interval = float(raw or "0.15")
+        except ValueError:
+            interval = 0.15
+        if interval <= 0:
+            return
+        async with self._read_lock:
+            now = time.monotonic()
+            wait = self._last_read_at + interval - now
+            if wait > 0:
+                await asyncio.sleep(wait)
+            self._last_read_at = time.monotonic()
+
     async def _query(self, coro: Any) -> Any:
         """Fire one async subscription and wait for a single response."""
         try:
@@ -288,6 +308,7 @@ class TradeRepublicClient:
             self._ensure_session_for_write()
         else:
             self._ensure_session(allow_login=True)
+            await self._throttle_read()
         try:
             result = await self._query(coro)
             if mutating:
@@ -576,6 +597,46 @@ class TradeRepublicClient:
         )
         return {"range": range, "history": history}
 
+    @staticmethod
+    def _watchlist_contains(payload: Any, isin: str) -> bool:
+        rows: list[Any]
+        if isinstance(payload, list):
+            rows = payload
+        elif isinstance(payload, dict):
+            rows = []
+            for key in ("instruments", "positions", "items", "data", "watchlist"):
+                val = payload.get(key)
+                if isinstance(val, list):
+                    rows = val
+                    break
+            if not rows:
+                rows = [payload]
+        else:
+            rows = []
+        needle = isin.strip().upper()
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            instrument = row.get("instrument")
+            candidate = (
+                row.get("isin")
+                or row.get("instrumentId")
+                or row.get("ticker")
+                or (instrument.get("isin") if isinstance(instrument, dict) else None)
+            )
+            if isinstance(candidate, str) and candidate.strip().upper() == needle:
+                return True
+        return False
+
+    async def _verify_watchlist_membership(self, isin: str) -> bool | None:
+        """Return True/False if membership is known, None if verify failed/timed out."""
+        try:
+            watchlist = await self._query_auth(self._api.watchlist())
+        except Exception as exc:  # noqa: BLE001 — verify must not mask write outcome
+            LOGGER.info("Watchlist verify failed: %s", redact_secrets(str(exc)))
+            return None
+        return self._watchlist_contains(watchlist, isin)
+
     async def get_watchlist(self) -> dict[str, Any]:
         """Current watchlist instruments (login required)."""
         watchlist = await self._query_auth(self._api.watchlist())
@@ -586,10 +647,32 @@ class TradeRepublicClient:
         """Add an ISIN to the account watchlist (mutating, login required)."""
         isin = self._normalize_isin(ticker)
         result = await self._query_auth(self._api.add_to_watchlist(isin), mutating=True)
+        present = await self._verify_watchlist_membership(isin)
+        if present is True:
+            return {
+                "status": "completed",
+                "action": "add_to_watchlist",
+                "ticker": isin,
+                "verified": True,
+                "result": result,
+            }
+        if present is False:
+            return {
+                "status": "error",
+                "code": "watchlist_verify_failed",
+                "action": "add_to_watchlist",
+                "ticker": isin,
+                "verified": False,
+                "message": "Add acknowledged but ISIN not found on watchlist",
+                "result": result,
+            }
         return {
-            "status": "completed",
+            "status": "uncertain",
+            "code": "watchlist_verify_timeout",
             "action": "add_to_watchlist",
             "ticker": isin,
+            "verified": None,
+            "message": "Add sent but watchlist membership could not be verified",
             "result": result,
         }
 
@@ -599,10 +682,32 @@ class TradeRepublicClient:
         result = await self._query_auth(
             self._api.remove_from_watchlist(isin), mutating=True
         )
+        present = await self._verify_watchlist_membership(isin)
+        if present is False:
+            return {
+                "status": "completed",
+                "action": "remove_from_watchlist",
+                "ticker": isin,
+                "verified": True,
+                "result": result,
+            }
+        if present is True:
+            return {
+                "status": "error",
+                "code": "watchlist_verify_failed",
+                "action": "remove_from_watchlist",
+                "ticker": isin,
+                "verified": False,
+                "message": "Remove acknowledged but ISIN still present on watchlist",
+                "result": result,
+            }
         return {
-            "status": "completed",
+            "status": "uncertain",
+            "code": "watchlist_verify_timeout",
             "action": "remove_from_watchlist",
             "ticker": isin,
+            "verified": None,
+            "message": "Remove sent but watchlist absence could not be verified",
             "result": result,
         }
 

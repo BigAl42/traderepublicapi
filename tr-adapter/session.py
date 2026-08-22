@@ -9,15 +9,19 @@ Goals:
 
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
 import os
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
+
+from redact import redact_secrets
 
 LOGGER = logging.getLogger("tr_adapter.session")
 
@@ -140,7 +144,7 @@ def classify_auth_error(exc: Exception) -> ClassifiedError:
 
     return ClassifiedError(
         kind=ErrorKind.UNKNOWN,
-        message=f"Trade Republic API error: {message}",
+        message=f"Trade Republic API error: {redact_secrets(message)}",
         retryable=True,
         allow_relogin=False,
     )
@@ -188,11 +192,31 @@ class AuthCircuitBreaker:
             tmp = self.state_path.with_suffix(self.state_path.suffix + ".tmp")
             tmp.write_text(json.dumps(self._state, indent=2), encoding="utf-8")
             tmp.replace(self.state_path)
+            try:
+                os.chmod(self.state_path, 0o600)
+            except OSError:
+                pass
         except OSError as exc:
             LOGGER.warning("Could not persist auth circuit state: %s", exc)
 
-    def remaining_cooldown_seconds(self) -> int:
+    @contextmanager
+    def _cross_process_lock(self, *, persist: bool = True) -> Iterator[None]:
+        """Thread lock + fcntl file lock so Hermes respawns share circuit state safely."""
         with self._lock:
+            self.state_path.parent.mkdir(parents=True, exist_ok=True)
+            lock_path = Path(str(self.state_path) + ".lock")
+            with open(lock_path, "a+", encoding="utf-8") as lock_fh:
+                fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+                try:
+                    self._state = self._load()
+                    yield
+                    if persist:
+                        self._save()
+                finally:
+                    fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+
+    def remaining_cooldown_seconds(self) -> int:
+        with self._cross_process_lock(persist=False):
             open_until = float(self._state.get("open_until") or 0)
             return max(0, int(open_until - time.time()))
 
@@ -215,17 +239,16 @@ class AuthCircuitBreaker:
         )
 
     def record_success(self) -> None:
-        with self._lock:
+        with self._cross_process_lock():
             self._state = self._default_state()
-            self._save()
 
     def record_failure(self, classified: ClassifiedError) -> None:
-        with self._lock:
+        with self._cross_process_lock():
             now = time.time()
             self._state["failure_count"] = int(self._state.get("failure_count") or 0) + 1
             self._state["last_failure_at"] = now
             self._state["last_kind"] = classified.kind.value
-            self._state["last_message"] = classified.message
+            self._state["last_message"] = redact_secrets(classified.message)
 
             open_now = classified.kind == ErrorKind.RATE_LIMITED
             open_now = open_now or self._state["failure_count"] >= self.failure_threshold
@@ -241,7 +264,6 @@ class AuthCircuitBreaker:
                     classified.kind.value,
                     self._state["failure_count"],
                 )
-            self._save()
 
 
 class SessionBlockedError(Exception):

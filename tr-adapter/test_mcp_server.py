@@ -22,7 +22,14 @@ if str(ADAPTER_DIR) not in sys.path:
 
 def _fresh_import_mcp_server():
     for name in list(sys.modules):
-        if name in {"mcp_server", "tr_client"} or name.startswith("mcp_server."):
+        if name in {
+            "mcp_server",
+            "tr_client",
+            "tr_adapter_mcp_server",
+            "mcp_write",
+            "redact",
+            "session",
+        } or name.startswith("mcp_server."):
             del sys.modules[name]
     import mcp_server
 
@@ -284,38 +291,104 @@ class WatchlistWriteTest(unittest.IsolatedAsyncioTestCase):
                 {"ticker": "US0378331005", "confirmed": False},
             )
         mock.add_to_watchlist.assert_not_called()
-        self.assertIn("confirmation_required", self._tool_text(result))
-        self.assertIn("US0378331005", self._tool_text(result))
+        text = self._tool_text(result)
+        self.assertIn("confirmation_required", text)
+        self.assertIn("US0378331005", text)
+        self.assertIn("confirm_token", text)
 
-    async def test_add_executes_after_confirmation(self):
+    async def test_add_rejects_bare_confirmed(self):
         mock = _mock_client()
         mcp_server = _patch_client(mock)
         with patch.dict(os.environ, {"TR_MCP_WRITE_ENABLED": "1"}):
-            await mcp_server.mcp.call_tool(
-                "add_to_watchlist",
-                {"ticker": "US0378331005", "confirmed": True},
-            )
+            with self.assertRaises(Exception) as ctx:
+                await mcp_server.mcp.call_tool(
+                    "add_to_watchlist",
+                    {"ticker": "US0378331005", "confirmed": True},
+                )
+        self.assertIn("confirm_token", str(ctx.exception).lower())
+        mock.add_to_watchlist.assert_not_called()
+
+    async def test_add_executes_after_confirmation(self):
+        import json
+        import tempfile
+        from pathlib import Path
+
+        mock = _mock_client()
+        mcp_server = _patch_client(mock)
+        with tempfile.TemporaryDirectory() as tmp:
+            store = str(Path(tmp) / "confirm.json")
+            with patch.dict(
+                os.environ,
+                {"TR_MCP_WRITE_ENABLED": "1", "TR_MCP_CONFIRM_STORE": store},
+            ):
+                import mcp_write as mw
+
+                mw._STORE = mw.ConfirmationStore(Path(store))
+                preview = await mcp_server.mcp.call_tool(
+                    "add_to_watchlist",
+                    {"ticker": "US0378331005", "confirmed": False},
+                )
+                text = self._tool_text(preview)
+                token = json.loads(text)["confirm_token"]
+                await mcp_server.mcp.call_tool(
+                    "add_to_watchlist",
+                    {
+                        "ticker": "US0378331005",
+                        "confirmed": True,
+                        "confirm_token": token,
+                    },
+                )
         mock.add_to_watchlist.assert_awaited_once_with("US0378331005")
 
     async def test_remove_executes_after_confirmation(self):
+        import json
+        import tempfile
+        from pathlib import Path
+
         mock = _mock_client()
         mcp_server = _patch_client(mock)
-        with patch.dict(os.environ, {"TR_MCP_WRITE_ENABLED": "1"}):
-            await mcp_server.mcp.call_tool(
-                "remove_from_watchlist",
-                {"ticker": "US0378331005", "confirmed": True},
-            )
+        with tempfile.TemporaryDirectory() as tmp:
+            store = str(Path(tmp) / "confirm.json")
+            with patch.dict(
+                os.environ,
+                {"TR_MCP_WRITE_ENABLED": "1", "TR_MCP_CONFIRM_STORE": store},
+            ):
+                import mcp_write as mw
+
+                mw._STORE = mw.ConfirmationStore(Path(store))
+                preview = await mcp_server.mcp.call_tool(
+                    "remove_from_watchlist",
+                    {"ticker": "US0378331005", "confirmed": False},
+                )
+                token = json.loads(self._tool_text(preview))["confirm_token"]
+                await mcp_server.mcp.call_tool(
+                    "remove_from_watchlist",
+                    {
+                        "ticker": "US0378331005",
+                        "confirmed": True,
+                        "confirm_token": token,
+                    },
+                )
         mock.remove_from_watchlist.assert_awaited_once_with("US0378331005")
 
 
 class McpWriteHelpersTest(unittest.TestCase):
     def test_confirmation_message_add(self):
-        from mcp_write import confirmation_required
+        import tempfile
+        from pathlib import Path
 
-        payload = confirmation_required("add_to_watchlist", "US0378331005", instrument_name="Apple")
-        self.assertEqual(payload["status"], "confirmation_required")
-        self.assertIn("Apple", payload["message"])
-        self.assertIn("US0378331005", payload["message"])
+        from mcp_write import ConfirmationStore, confirmation_required
+        import mcp_write as mw
+
+        with tempfile.TemporaryDirectory() as tmp:
+            mw._STORE = ConfirmationStore(Path(tmp) / "c.json")
+            payload = confirmation_required(
+                "add_to_watchlist", "US0378331005", instrument_name="Apple"
+            )
+            self.assertEqual(payload["status"], "confirmation_required")
+            self.assertIn("Apple", payload["message"])
+            self.assertIn("US0378331005", payload["message"])
+            self.assertIn("confirm_token", payload)
 
 
 class StdioSmokeTest(unittest.IsolatedAsyncioTestCase):

@@ -19,7 +19,9 @@ if str(ROOT) not in sys.path:
 
 def _fresh_import_mcp_server():
     for name in list(sys.modules):
-        if name in {"mcp_server", "tr_client"} or name.startswith("mcp_server."):
+        if name in {"mcp_server", "tr_client", "tr_adapter_mcp_server", "mcp_write", "redact", "session"} or name.startswith(
+            "mcp_server."
+        ):
             del sys.modules[name]
     import mcp_server
 
@@ -187,6 +189,21 @@ class RootMcpServerTest(unittest.IsolatedAsyncioTestCase):
         mock.add_to_watchlist.assert_not_called()
         text = "".join(block.text for block in result if hasattr(block, "text"))
         self.assertIn("confirmation_required", text)
+        self.assertIn("confirm_token", text)
+
+    async def test_add_to_watchlist_rejects_bare_confirmed(self):
+        from unittest.mock import patch
+
+        mock = _mock_client()
+        mcp_server = _patch_client(mock)
+        with patch.dict(os.environ, {"TR_MCP_WRITE_ENABLED": "1"}):
+            with self.assertRaises(Exception) as ctx:
+                await mcp_server.mcp.call_tool(
+                    "add_to_watchlist",
+                    {"ticker": "US0378331005", "confirmed": True},
+                )
+        self.assertIn("confirm_token", str(ctx.exception).lower())
+        mock.add_to_watchlist.assert_not_called()
 
     def test_ticker_validation(self):
         mcp_server = _fresh_import_mcp_server()
