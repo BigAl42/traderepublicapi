@@ -174,12 +174,32 @@ class TRApi:
         self.sec_acc_no = data.get("securitiesAccountNumber") or self.sec_acc_no
         return data
 
+    def _has_tr_session_cookie(self):
+        return any(c.name == "tr_session" for c in self.session.cookies)
+
     def _resume_web_session(self):
-        if not self.cookies_file.is_file():
+        """Resume using cookie jar and/or already-injected in-memory tr_session.
+
+        Does not require the cookie file to exist when a tr_session cookie is
+        already present in the requests session (e.g. TR_TOKEN injection).
+        """
+        if not self.cookies_file.is_file() and not self._has_tr_session_cookie():
             return False
         data = self.refresh_account_settings()
         if data is None:
-            self.session.cookies.clear()
+            # Drop only the session cookie — keep other jar state for diagnostics.
+            try:
+                self.session.cookies.clear(domain=".traderepublic.com", path="/", name="tr_session")
+            except (KeyError, TypeError, AttributeError):
+                expired = [c for c in list(self.session.cookies) if c.name == "tr_session"]
+                for cookie in expired:
+                    try:
+                        self.session.cookies.clear(
+                            domain=cookie.domain, path=cookie.path, name=cookie.name
+                        )
+                    except (KeyError, TypeError, AttributeError):
+                        pass
+            self.sessionToken = None
             return False
         cookie = next(
             (c.value for c in self.session.cookies if c.name == "tr_session"),
@@ -187,6 +207,40 @@ class TRApi:
         )
         self.sessionToken = cookie
         return True
+
+    async def reset_transport(self):
+        """Close websocket and clear one-shot receive state so queries can retry."""
+        async with self.mu:
+            self.started = False
+            self.callbacks = {}
+            self.latest_response = {}
+            ws = self.ws
+            self.ws = None
+        if ws is not None:
+            try:
+                await ws.close()
+            except Exception:
+                pass
+
+    def reset_transport_sync(self):
+        """Best-effort sync reset when no event loop is available."""
+        self.started = False
+        self.callbacks = {}
+        self.latest_response = {}
+        ws = self.ws
+        self.ws = None
+        if ws is not None:
+            try:
+                close = getattr(ws, "close", None)
+                if close is not None:
+                    # websockets close is async; schedule if loop running, else ignore.
+                    try:
+                        loop = asyncio.get_running_loop()
+                        loop.create_task(ws.close())
+                    except RuntimeError:
+                        pass
+            except Exception:
+                pass
 
     def register_new_device(self, processId=None):
         self.signing_key = SigningKey.generate(curve=NIST256p, hashfunc=hashlib.sha512)
@@ -1159,68 +1213,64 @@ class TRApi:
 
             self.started = True
 
-        while True:
-            data_a = await self.get_data()
+        try:
+            while True:
+                data_a = await self.get_data()
 
-            data = str(data_a).split()
+                data = str(data_a).split()
 
-            id, state = data[:2]
+                id, state = data[:2]
 
-            # Initial response
-            if len(data[2:]) == 1:
-                data = data[2:][0]
-            else:
-                data = data[2:]
+                # Initial response
+                if len(data[2:]) == 1:
+                    data = data[2:][0]
+                else:
+                    data = data[2:]
 
-            if state == "D":
-                data = self.decode_updates(id, data)
-            elif state == "A":
-                pass
-            elif state == "C":
-                continue
-            elif state == "E":
-                sErr = f"ERROR state: {state} data: {data}"
-                # print(sErr)
-                if receive_one:  # cleanup
-                    self.started = False
-                    self.callbacks = {}
-                    self.latest_response = {}
-                    # return None
-                raise TRapiExcServerErrorState(
-                    f"Error during server access\n\tServer-side Object probably expired...\n\t{sErr}")
-                # continue
-            else:
-                sErr = f"ERROR UNKNOWN state: {state} data: {data}"
-                print(sErr)
-                raise TRapiExcServerUnknownState(f"Error during server access\n\t{sErr}")
-                # continue
+                if state == "D":
+                    data = self.decode_updates(id, data)
+                elif state == "A":
+                    pass
+                elif state == "C":
+                    continue
+                elif state == "E":
+                    sErr = f"ERROR state: {state} data: {data}"
+                    raise TRapiExcServerErrorState(
+                        f"Error during server access\n\tServer-side Object probably expired...\n\t{sErr}"
+                    )
+                else:
+                    sErr = f"ERROR UNKNOWN state: {state} data: {data}"
+                    print(sErr)
+                    raise TRapiExcServerUnknownState(f"Error during server access\n\t{sErr}")
 
-            if isinstance(data, list):
-                data = " ".join(data)
+                if isinstance(data, list):
+                    data = " ".join(data)
 
-            self.latest_response[id] = data
-            obj = json.loads(data)
+                self.latest_response[id] = data
+                obj = json.loads(data)
 
-            key = None
-            for k, v in self.dict.items():
-                if v == id:
-                    key = k
-                    break
+                key = None
+                for k, v in self.dict.items():
+                    if v == id:
+                        key = k
+                        break
 
-            if isinstance(obj, list):
-                # if it is a list just add the key to every element
-                for i in range(0, len(obj)):
-                    obj[i]["key"] = key
-            elif isinstance(obj, dict):
-                obj["key"] = key
+                if isinstance(obj, list):
+                    # if it is a list just add the key to every element
+                    for i in range(0, len(obj)):
+                        obj[i]["key"] = key
+                elif isinstance(obj, dict):
+                    obj["key"] = key
 
+                if receive_one:
+                    return obj
+                self.callbacks[id](obj)
+        finally:
+            # Always release one-shot receive state (timeouts, cancel, E/unknown).
             if receive_one:
                 self.started = False
                 self.callbacks = {}
-
                 self.latest_response = {}
-                return obj
-            self.callbacks[id](obj)
 
     @classmethod
     def all_isins(cls):
