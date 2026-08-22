@@ -43,6 +43,19 @@ def _mock_client() -> MagicMock:
         "instrument": {"name": "Apple"},
         "position": {"quantity": 5},
     })
+    mock.search_instruments = AsyncMock(return_value={
+        "query": "Apple",
+        "results": [{"isin": "US0378331005", "name": "Apple Inc."}],
+    })
+    mock.get_price_history = AsyncMock(return_value={
+        "ticker": "US0378331005",
+        "range": "1y",
+        "history": {"aggregates": []},
+    })
+    mock.get_stock_news = AsyncMock(return_value={
+        "ticker": "US0378331005",
+        "news": [{"headline": "Apple reports earnings"}],
+    })
     return mock
 
 
@@ -65,13 +78,22 @@ class TickerInputTest(unittest.TestCase):
 
 
 class TradeRepublicClientTest(unittest.TestCase):
-    def test_missing_credentials_raises(self):
+    def test_init_without_credentials_allowed_for_public_tools(self):
+        _fresh_import_mcp_server()
+        from tr_client import TradeRepublicClient
+
+        with patch.dict(os.environ, {}, clear=True):
+            client = TradeRepublicClient()
+        self.assertFalse(client._has_credentials)
+
+    def test_account_methods_require_credentials(self):
         _fresh_import_mcp_server()
         from tr_client import TradeRepublicClient, TradeRepublicClientError
 
         with patch.dict(os.environ, {}, clear=True):
+            client = TradeRepublicClient()
             with self.assertRaises(TradeRepublicClientError) as ctx:
-                TradeRepublicClient()
+                client._ensure_session()
         self.assertIn("Missing credentials", str(ctx.exception))
 
     def test_normalize_position(self):
@@ -125,6 +147,30 @@ class McpToolsTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(Exception) as ctx:
             await mcp_server.mcp.call_tool("get_account_summary", {})
         self.assertIn("session problem", str(ctx.exception).lower())
+
+    async def test_search_instruments(self):
+        mock = _mock_client()
+        mcp_server = _patch_client(mock)
+        await mcp_server.mcp.call_tool(
+            "search_instruments",
+            {"query": "Apple", "instrument_type": "stock", "jurisdiction": "DE"},
+        )
+        mock.search_instruments.assert_awaited_once()
+
+    async def test_get_price_history(self):
+        mock = _mock_client()
+        mcp_server = _patch_client(mock)
+        await mcp_server.mcp.call_tool(
+            "get_price_history",
+            {"ticker": "US0378331005", "range": "1y"},
+        )
+        mock.get_price_history.assert_awaited_once()
+
+    async def test_get_stock_news(self):
+        mock = _mock_client()
+        mcp_server = _patch_client(mock)
+        await mcp_server.mcp.call_tool("get_stock_news", {"ticker": "US0378331005"})
+        mock.get_stock_news.assert_awaited_once_with("US0378331005")
 
 
 class StdioSmokeTest(unittest.IsolatedAsyncioTestCase):

@@ -84,6 +84,30 @@ class TickerInput(BaseModel):
     )
 
 
+class SearchInstrumentsInput(BaseModel):
+    """Parameters for neon search."""
+
+    query: str = Field(..., min_length=1, max_length=200, description="Search text, e.g. Apple or semiconductor")
+    instrument_type: str = Field(
+        default="stock",
+        description="Instrument type: stock, fund, derivative, or crypto",
+    )
+    jurisdiction: str = Field(default="DE", min_length=2, max_length=2, description="Country code, e.g. DE")
+    page: int = Field(default=1, ge=1, description="Result page (1-based)")
+    page_size: int = Field(default=20, ge=1, le=100, description="Results per page")
+
+
+class PriceHistoryInput(BaseModel):
+    """Parameters for aggregate price history."""
+
+    ticker: Annotated[str, BeforeValidator(_normalize_ticker)] = Field(
+        ...,
+        description="ISIN, e.g. US0378331005",
+    )
+    range: str = Field(default="1y", description="Time range: 1d, 5d, 1m, 3m, 1y, max")
+    exchange: str = Field(default="LSX", description="Exchange: LSX, TDG, LUS, TUB, BHS, B2C")
+
+
 def log_tool_call(name: str) -> Callable[[F], F]:
     def decorator(func: F) -> F:
         if asyncio.iscoroutinefunction(func):
@@ -173,6 +197,90 @@ async def get_position_details(ticker: str) -> dict:
     try:
         validated = TickerInput(ticker=ticker)
         return await get_client().get_ticker_details(validated.ticker)
+    except Exception as exc:
+        raise RuntimeError(_format_error(exc)) from exc
+
+
+@mcp.tool()
+@log_tool_call("search_instruments")
+async def search_instruments(
+    query: str,
+    instrument_type: str = "stock",
+    jurisdiction: str = "DE",
+    page: int = 1,
+    page_size: int = 20,
+) -> dict:
+    """Search Trade Republic for stocks, ETFs, crypto, or derivatives.
+
+    Use this to find ISINs by company name or keyword before fetching details.
+    Does not require a logged-in account. Read-only.
+
+    Args:
+        query: Search text (e.g. "Apple", "Tesla", "MSCI World").
+        instrument_type: One of stock, fund, derivative, crypto.
+        jurisdiction: Country filter (DE, AT, FR, …).
+        page: Result page, starting at 1.
+        page_size: Number of results per page (max 100).
+    """
+    try:
+        validated = SearchInstrumentsInput(
+            query=query,
+            instrument_type=instrument_type,
+            jurisdiction=jurisdiction,
+            page=page,
+            page_size=page_size,
+        )
+        return await get_client().search_instruments(
+            query=validated.query,
+            instrument_type=validated.instrument_type,
+            jurisdiction=validated.jurisdiction,
+            page=validated.page,
+            page_size=validated.page_size,
+        )
+    except Exception as exc:
+        raise RuntimeError(_format_error(exc)) from exc
+
+
+@mcp.tool()
+@log_tool_call("get_price_history")
+async def get_price_history(
+    ticker: str,
+    range: str = "1y",
+    exchange: str = "LSX",
+) -> dict:
+    """Return price history for any ISIN, even if not held in the portfolio.
+
+    Useful for charts and performance context. Does not require login. Read-only.
+
+    Args:
+        ticker: ISIN (e.g. US0378331005).
+        range: 1d, 5d, 1m, 3m, 1y, or max.
+        exchange: Trading venue (default LSX = Lang & Schwarz).
+    """
+    try:
+        validated = PriceHistoryInput(ticker=ticker, range=range, exchange=exchange)
+        return await get_client().get_price_history(
+            validated.ticker,
+            range=validated.range,
+            exchange=validated.exchange,
+        )
+    except Exception as exc:
+        raise RuntimeError(_format_error(exc)) from exc
+
+
+@mcp.tool()
+@log_tool_call("get_stock_news")
+async def get_stock_news(ticker: str) -> dict:
+    """Return recent news articles for an ISIN.
+
+    Works for any instrument, not only portfolio holdings. No login required. Read-only.
+
+    Args:
+        ticker: ISIN of the instrument (e.g. US0378331005).
+    """
+    try:
+        validated = TickerInput(ticker=ticker)
+        return await get_client().get_stock_news(validated.ticker)
     except Exception as exc:
         raise RuntimeError(_format_error(exc)) from exc
 
