@@ -81,6 +81,64 @@ class SurfaceTest(unittest.TestCase):
         self.assertTrue(hasattr(trapi, "TRapiException"))
 
 
+class TransportLifecycleTest(unittest.IsolatedAsyncioTestCase):
+    async def test_start_receive_one_clears_started_on_error(self):
+        api = TRApi("+49000000000", "0000")
+
+        async def boom():
+            raise TRapiException("simulated ws failure")
+
+        api.get_data = boom  # type: ignore[method-assign]
+        with self.assertRaises(TRapiException):
+            await api.start(receive_one=True)
+        self.assertFalse(api.started)
+        # Can start again after failure cleanup.
+        with self.assertRaises(TRapiException):
+            await api.start(receive_one=True)
+        self.assertFalse(api.started)
+
+    async def test_reset_transport_allows_reconnect(self):
+        api = TRApi("+49000000000", "0000")
+        api.started = True
+        api.ws = object()
+        await api.reset_transport()
+        self.assertFalse(api.started)
+        self.assertIsNone(api.ws)
+
+
+class ResumeWebSessionTest(unittest.TestCase):
+    def test_resume_without_cookie_file_uses_in_memory_session(self):
+        from http.cookiejar import Cookie
+        from unittest.mock import MagicMock
+
+        api = TRApi("+49000000000", "0000", cookies_file="/tmp/does-not-exist-tr-cookies.txt")
+        if api.cookies_file.is_file():
+            api.cookies_file.unlink()
+        cookie = Cookie(
+            version=0,
+            name="tr_session",
+            value="token-value",
+            port=None,
+            port_specified=False,
+            domain=".traderepublic.com",
+            domain_specified=True,
+            domain_initial_dot=True,
+            path="/",
+            path_specified=True,
+            secure=True,
+            expires=None,
+            discard=True,
+            comment=None,
+            comment_url=None,
+            rest={"HttpOnly": ""},
+        )
+        api.session.cookies.set_cookie(cookie)
+        api.refresh_account_settings = MagicMock(return_value={"securitiesAccountNumber": "123"})
+        self.assertTrue(api._resume_web_session())
+        self.assertEqual(api.sessionToken, "token-value")
+        api.refresh_account_settings.assert_called_once()
+
+
 class CurrentWebProtocolTest(unittest.TestCase):
     def test_v2_login_endpoint_accepts_headers(self):
         api = TRApi("+49000000000", "0000")

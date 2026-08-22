@@ -117,6 +117,39 @@ class WriteSessionPolicyTest(unittest.TestCase):
                         self.assertEqual(ctx.exception.kind, ErrorKind.LOGIN_REQUIRED)
                         api.login.assert_not_called()
 
+    def test_interactive_login_defaults_off(self):
+        import os
+        from unittest.mock import MagicMock, patch
+
+        env = {
+            "TR_TOKEN": "",
+            "TR_PHONE": "+491234",
+            "TR_PIN": "1234",
+        }
+        # Ensure default env var is unset so client default applies.
+        env.pop("TR_MCP_ALLOW_INTERACTIVE_LOGIN", None)
+        with patch.dict(os.environ, env, clear=False):
+            os.environ.pop("TR_MCP_ALLOW_INTERACTIVE_LOGIN", None)
+            with tempfile.TemporaryDirectory() as tmp:
+                cookies = Path(tmp) / "cookies.txt"
+                circuit = Path(tmp) / "circuit.json"
+                with patch("tr_client.TRApi") as api_cls:
+                    api = MagicMock()
+                    api.cookies_file = cookies
+                    api._resume_web_session.return_value = False
+                    api_cls.return_value = api
+                    with patch("tr_client.circuit_state_path_for_cookies", return_value=circuit):
+                        import importlib
+                        import tr_client
+
+                        importlib.reload(tr_client)
+                        client = tr_client.TradeRepublicClient()
+                        self.assertFalse(client._allow_interactive_login)
+                        with self.assertRaises(tr_client.TradeRepublicClientError) as ctx:
+                            client._ensure_session(allow_login=True)
+                        self.assertEqual(ctx.exception.kind, ErrorKind.LOGIN_REQUIRED)
+                        api.login.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -80,7 +80,7 @@ class TradeRepublicClient:
         self._timeout = float(os.getenv("TR_TIMEOUT", "20"))
         self._has_credentials = bool(self._token or (phone and pin))
         self._allow_interactive_login = os.getenv(
-            "TR_MCP_ALLOW_INTERACTIVE_LOGIN", "1"
+            "TR_MCP_ALLOW_INTERACTIVE_LOGIN", "0"
         ).strip().lower() in ("1", "true", "yes")
 
         self._api = TRApi(
@@ -127,6 +127,18 @@ class TradeRepublicClient:
 
     def _invalidate_session(self) -> None:
         self._session_ready = False
+        # Drop sticky websocket so the next query reconnects with fresh cookies.
+        try:
+            self._api.reset_transport_sync()
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.debug("Transport reset during invalidate failed: %s", exc)
+
+    async def _reset_transport(self) -> None:
+        try:
+            await self._api.reset_transport()
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.debug("Async transport reset failed: %s", exc)
+            self._api.reset_transport_sync()
 
     def _map_error(self, exc: Exception) -> TradeRepublicClientError:
         if isinstance(exc, SessionBlockedError):
@@ -156,6 +168,8 @@ class TradeRepublicClient:
             self._persist_cookies()
             self._session_ready = True
             self._circuit.record_success()
+            # New HTTP session cookies must not reuse a stale websocket.
+            self._api.reset_transport_sync()
             LOGGER.info("Resumed Trade Republic session from cookies/token")
             return True
         return False
@@ -225,6 +239,8 @@ class TradeRepublicClient:
                 return False
             self._persist_cookies()
             self._session_ready = True
+            # Force websocket reconnect with refreshed cookies.
+            self._api.reset_transport_sync()
             return True
         except Exception as exc:  # noqa: BLE001
             LOGGER.info("Soft session refresh failed: %s", exc)
@@ -252,10 +268,19 @@ class TradeRepublicClient:
 
     async def _query(self, coro: Any) -> Any:
         """Fire one async subscription and wait for a single response."""
-        await coro
-        return await asyncio.wait_for(
-            self._api.start(receive_one=True), timeout=self._timeout
-        )
+        try:
+            await coro
+            return await asyncio.wait_for(
+                self._api.start(receive_one=True), timeout=self._timeout
+            )
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            await self._reset_transport()
+            raise
+        except Exception:
+            # Ensure one-shot receive state cannot brick the client.
+            if self._api.started:
+                await self._reset_transport()
+            raise
 
     async def _query_auth(self, coro: Any, *, mutating: bool = False) -> Any:
         """Authenticated WebSocket query."""
