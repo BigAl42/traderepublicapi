@@ -19,8 +19,6 @@ from typing import Annotated
 
 from tr_client import TradeRepublicClient, TradeRepublicClientError
 from mcp_write import (
-    ConfirmationError,
-    WriteToolsDisabledError,
     confirmation_required,
     require_confirmation,
     require_write_enabled,
@@ -173,29 +171,6 @@ def log_tool_call(name: str) -> Callable[[F], F]:
         return sync_wrapper  # type: ignore[return-value]
 
     return decorator
-
-
-def _format_error(exc: Exception) -> str:
-    """Legacy human-readable string; prefer raise_structured for MCP tools."""
-    if isinstance(exc, WriteToolsDisabledError):
-        return f"Trade Republic write tools disabled: {exc}"
-    if isinstance(exc, ConfirmationError):
-        return f"Trade Republic confirmation error: {exc}"
-    if isinstance(exc, TradeRepublicClientError):
-        kind = getattr(exc, "kind", None)
-        kind_value = getattr(kind, "value", None) or "unknown"
-        if kind_value == "rate_limited":
-            prefix = "Trade Republic rate limit"
-        elif exc.retryable:
-            prefix = "Trade Republic session problem"
-        else:
-            prefix = "Trade Republic configuration problem"
-        message = f"{prefix} [{kind_value}]: {redact_secrets(str(exc))}"
-        retry_after = getattr(exc, "retry_after_seconds", None)
-        if retry_after:
-            message = f"{message} (retry_after_seconds={retry_after})"
-        return message
-    return f"Unexpected adapter error: {redact_secrets(str(exc))}"
 
 
 @mcp.tool()
