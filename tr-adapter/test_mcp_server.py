@@ -75,6 +75,18 @@ def _mock_client() -> MagicMock:
         "details": {"name": "Bitcoin"},
         "position": None,
     })
+    mock.get_portfolio_history = AsyncMock(return_value={
+        "range": "1y",
+        "history": {"aggregates": []},
+    })
+    mock.get_watchlist = AsyncMock(return_value={
+        "watchlist": [{"isin": "US0378331005", "name": "Apple"}],
+    })
+    mock.get_recent_transactions = AsyncMock(return_value={
+        "limit": 20,
+        "count": 1,
+        "transactions": [{"type": "timelineEvent", "title": "Buy"}],
+    })
     return mock
 
 
@@ -129,6 +141,16 @@ class TradeRepublicClientTest(unittest.TestCase):
         self.assertEqual(item["ticker"], "US0378331005")
         self.assertEqual(item["quantity"], 10)
         self.assertEqual(item["profit_loss"], 25.5)
+
+    def test_extract_timeline_items(self):
+        from tr_client import TradeRepublicClient
+
+        events = [{"id": "1"}, {"id": "2"}]
+        self.assertEqual(TradeRepublicClient._extract_timeline_items(events), events)
+        self.assertEqual(
+            TradeRepublicClient._extract_timeline_items({"data": events}),
+            events,
+        )
 
 
 class McpToolsTest(unittest.IsolatedAsyncioTestCase):
@@ -208,6 +230,24 @@ class McpToolsTest(unittest.IsolatedAsyncioTestCase):
         mcp_server = _patch_client(mock)
         await mcp_server.mcp.call_tool("get_stock_news", {"ticker": "US0378331005"})
         mock.get_stock_news.assert_awaited_once_with("US0378331005")
+
+    async def test_get_portfolio_history(self):
+        mock = _mock_client()
+        mcp_server = _patch_client(mock)
+        await mcp_server.mcp.call_tool("get_portfolio_history", {"range": "1y"})
+        mock.get_portfolio_history.assert_awaited_once_with("1y")
+
+    async def test_get_watchlist(self):
+        mock = _mock_client()
+        mcp_server = _patch_client(mock)
+        await mcp_server.mcp.call_tool("get_watchlist", {})
+        mock.get_watchlist.assert_awaited_once()
+
+    async def test_get_recent_transactions(self):
+        mock = _mock_client()
+        mcp_server = _patch_client(mock)
+        await mcp_server.mcp.call_tool("get_recent_transactions", {"limit": 10})
+        mock.get_recent_transactions.assert_awaited_once_with(limit=10, after=None)
 
 
 class StdioSmokeTest(unittest.IsolatedAsyncioTestCase):

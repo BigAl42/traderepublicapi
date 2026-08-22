@@ -410,3 +410,52 @@ class TradeRepublicClient:
             "performance": analysis["performance"],
             "position": analysis["position"],
         }
+
+    async def get_portfolio_history(self, range: str = "max") -> dict[str, Any]:
+        """Portfolio value history over time (login required)."""
+        if range not in self.RANGE_VALUES:
+            raise TradeRepublicClientError(
+                f"range must be one of {self.RANGE_VALUES}",
+                retryable=False,
+            )
+        history = await self._query_auth(
+            self._api.portfolio_aggregate_history(range=range)
+        )
+        return {"range": range, "history": history}
+
+    async def get_watchlist(self) -> dict[str, Any]:
+        """Current watchlist instruments (login required)."""
+        watchlist = await self._query_auth(self._api.watchlist())
+        items = watchlist if isinstance(watchlist, list) else watchlist
+        return {"watchlist": items}
+
+    @staticmethod
+    def _extract_timeline_items(payload: Any) -> list[Any]:
+        if isinstance(payload, list):
+            return payload
+        if isinstance(payload, dict):
+            for key in ("data", "items", "events", "timeline", "results"):
+                value = payload.get(key)
+                if isinstance(value, list):
+                    return value
+        return []
+
+    async def get_recent_transactions(
+        self,
+        limit: int = 20,
+        after: str | None = None,
+    ) -> dict[str, Any]:
+        """Recent account transactions from timeline (login required)."""
+        if limit < 1 or limit > 100:
+            raise TradeRepublicClientError(
+                "limit must be between 1 and 100",
+                retryable=False,
+            )
+        raw = await self._query_auth(self._api.timeline_transactions(after=after))
+        items = self._extract_timeline_items(raw)
+        return {
+            "after": after,
+            "limit": limit,
+            "count": min(len(items), limit),
+            "transactions": items[:limit],
+        }

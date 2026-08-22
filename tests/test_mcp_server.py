@@ -72,6 +72,18 @@ def _mock_client() -> MagicMock:
         "details": {"name": "Bitcoin"},
         "position": None,
     })
+    mock.get_portfolio_history = AsyncMock(return_value={
+        "range": "1y",
+        "history": {"aggregates": []},
+    })
+    mock.get_watchlist = AsyncMock(return_value={
+        "watchlist": [{"isin": "US0378331005", "name": "Apple"}],
+    })
+    mock.get_recent_transactions = AsyncMock(return_value={
+        "limit": 20,
+        "count": 1,
+        "transactions": [{"type": "timelineEvent", "title": "Buy"}],
+    })
     return mock
 
 
@@ -140,6 +152,24 @@ class RootMcpServerTest(unittest.IsolatedAsyncioTestCase):
         mcp_server = _patch_client(mock)
         await mcp_server.mcp.call_tool("get_stock_news", {"ticker": "US0378331005"})
         mock.get_stock_news.assert_awaited_once_with("US0378331005")
+
+    async def test_get_portfolio_history(self):
+        mock = _mock_client()
+        mcp_server = _patch_client(mock)
+        await mcp_server.mcp.call_tool("get_portfolio_history", {"range": "max"})
+        mock.get_portfolio_history.assert_awaited_once_with("max")
+
+    async def test_get_watchlist(self):
+        mock = _mock_client()
+        mcp_server = _patch_client(mock)
+        await mcp_server.mcp.call_tool("get_watchlist", {})
+        mock.get_watchlist.assert_awaited_once()
+
+    async def test_get_recent_transactions(self):
+        mock = _mock_client()
+        mcp_server = _patch_client(mock)
+        await mcp_server.mcp.call_tool("get_recent_transactions", {"limit": 5})
+        mock.get_recent_transactions.assert_awaited_once_with(limit=5, after=None)
 
     def test_ticker_validation(self):
         mcp_server = _fresh_import_mcp_server()
