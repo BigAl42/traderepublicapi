@@ -46,12 +46,7 @@ class TradeRepublicClient:
         locale = os.getenv("TR_LOCALE", "de")
         cookies_file = os.getenv("TR_COOKIES_FILE", "tr_cookies.txt")
         self._timeout = float(os.getenv("TR_TIMEOUT", "20"))
-
-        if not self._token and (not phone or not pin):
-            raise TradeRepublicClientError(
-                "Missing credentials. Set TR_TOKEN (session) or TR_PHONE and TR_PIN in the environment.",
-                retryable=False,
-            )
+        self._has_credentials = bool(self._token or (phone and pin))
 
         self._api = TRApi(
             phone or "+0000000000",
@@ -90,6 +85,11 @@ class TradeRepublicClient:
         """Synchronous login / session resume (uses requests, no event loop)."""
         if self._session_ready:
             return
+        if not self._has_credentials:
+            raise TradeRepublicClientError(
+                "Missing credentials. Set TR_TOKEN (session) or TR_PHONE and TR_PIN in the environment.",
+                retryable=False,
+            )
         try:
             if self._token:
                 self._inject_token_on_api()
@@ -142,6 +142,93 @@ class TradeRepublicClient:
                 retryable=True,
             )
         return TradeRepublicClientError(f"Trade Republic API error: {message}", retryable=True)
+
+    async def _query_public(self, coro: Any) -> Any:
+        """WebSocket query that does not require a logged-in session."""
+        try:
+            await coro
+            return await asyncio.wait_for(
+                self._api.start(receive_one=True), timeout=self._timeout
+            )
+        except (TRapiException, TRapiExcServerErrorState) as exc:
+            raise self._map_error(exc) from exc
+
+    INSTRUMENT_TYPES = TRApi.instrument_list
+    RANGE_VALUES = TRApi.range_list
+    EXCHANGES = TRApi.exchange_list
+
+    @staticmethod
+    def _default_jurisdiction(explicit: str | None = None) -> str:
+        if explicit:
+            return explicit.upper()
+        return os.getenv("TR_JURISDICTION", os.getenv("TR_LOCALE", "de")).upper()
+
+    async def search_instruments(
+        self,
+        query: str,
+        instrument_type: str = "stock",
+        jurisdiction: str | None = None,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> dict[str, Any]:
+        """Search Trade Republic instruments by name or keyword (no login required)."""
+        jurisdiction = self._default_jurisdiction(jurisdiction)
+        if instrument_type not in self.INSTRUMENT_TYPES:
+            raise TradeRepublicClientError(
+                f"instrument_type must be one of {self.INSTRUMENT_TYPES}",
+                retryable=False,
+            )
+        results = await self._query_public(
+            self._api.neon_search(
+                query=query,
+                page=page,
+                page_size=page_size,
+                instrument_type=instrument_type,
+                jurisdiction=jurisdiction,
+            )
+        )
+        return {
+            "query": query,
+            "instrument_type": instrument_type,
+            "jurisdiction": jurisdiction,
+            "page": page,
+            "page_size": page_size,
+            "results": results,
+        }
+
+    async def get_price_history(
+        self,
+        ticker: str,
+        range: str = "1y",
+        exchange: str = "LSX",
+    ) -> dict[str, Any]:
+        """Price history for any ISIN (no login required)."""
+        isin = ticker.strip().upper()
+        if range not in self.RANGE_VALUES:
+            raise TradeRepublicClientError(
+                f"range must be one of {self.RANGE_VALUES}",
+                retryable=False,
+            )
+        if exchange not in self.EXCHANGES:
+            raise TradeRepublicClientError(
+                f"exchange must be one of {self.EXCHANGES}",
+                retryable=False,
+            )
+        history = await self._query_public(
+            self._api.aggregate_history_light(isin, range=range, exchange=exchange)
+        )
+        return {
+            "ticker": isin,
+            "range": range,
+            "exchange": exchange,
+            "history": history,
+        }
+
+    async def get_stock_news(self, ticker: str) -> dict[str, Any]:
+        """News articles for an ISIN (no login required)."""
+        isin = ticker.strip().upper()
+        news = await self._query_public(self._api.neon_news(isin))
+        return {"ticker": isin, "news": news}
 
     @staticmethod
     def _unwrap_cash(payload: Any) -> list[dict[str, Any]]:

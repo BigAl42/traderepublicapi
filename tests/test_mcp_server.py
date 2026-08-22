@@ -40,6 +40,19 @@ def _mock_client() -> MagicMock:
         "instrument": {"name": "Apple"},
         "position": {"quantity": 5},
     })
+    mock.search_instruments = AsyncMock(return_value={
+        "query": "Apple",
+        "results": [{"isin": "US0378331005", "name": "Apple Inc."}],
+    })
+    mock.get_price_history = AsyncMock(return_value={
+        "ticker": "US0378331005",
+        "range": "1y",
+        "history": {"aggregates": []},
+    })
+    mock.get_stock_news = AsyncMock(return_value={
+        "ticker": "US0378331005",
+        "news": [{"headline": "Apple reports earnings"}],
+    })
     return mock
 
 
@@ -69,6 +82,27 @@ class RootMcpServerTest(unittest.IsolatedAsyncioTestCase):
         mcp_server = _patch_client(mock)
         await mcp_server.mcp.call_tool("get_position_details", {"ticker": "US0378331005"})
         mock.get_ticker_details.assert_awaited_once_with("US0378331005")
+
+    async def test_search_instruments(self):
+        mock = _mock_client()
+        mcp_server = _patch_client(mock)
+        await mcp_server.mcp.call_tool("search_instruments", {"query": "Apple"})
+        mock.search_instruments.assert_awaited_once()
+
+    async def test_get_price_history(self):
+        mock = _mock_client()
+        mcp_server = _patch_client(mock)
+        await mcp_server.mcp.call_tool(
+            "get_price_history",
+            {"ticker": "US0378331005", "range": "1y"},
+        )
+        mock.get_price_history.assert_awaited_once()
+
+    async def test_get_stock_news(self):
+        mock = _mock_client()
+        mcp_server = _patch_client(mock)
+        await mcp_server.mcp.call_tool("get_stock_news", {"ticker": "US0378331005"})
+        mock.get_stock_news.assert_awaited_once_with("US0378331005")
 
     def test_ticker_validation(self):
         mcp_server = _fresh_import_mcp_server()
