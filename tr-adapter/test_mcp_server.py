@@ -56,6 +56,25 @@ def _mock_client() -> MagicMock:
         "ticker": "US0378331005",
         "news": [{"headline": "Apple reports earnings"}],
     })
+    mock.get_stock_analysis = AsyncMock(return_value={
+        "ticker": "US0378331005",
+        "details": {"name": "Apple"},
+        "kpis": [],
+        "dividends": [],
+        "performance": {},
+        "position": None,
+    })
+    mock.get_etf_analysis = AsyncMock(return_value={
+        "ticker": "IE00B4L5Y983",
+        "details": {"name": "MSCI World"},
+        "composition": [],
+        "position": None,
+    })
+    mock.get_crypto_analysis = AsyncMock(return_value={
+        "ticker": "XC000A2P6LJ6",
+        "details": {"name": "Bitcoin"},
+        "position": None,
+    })
     return mock
 
 
@@ -131,7 +150,25 @@ class McpToolsTest(unittest.IsolatedAsyncioTestCase):
         mock = _mock_client()
         mcp_server = _patch_client(mock)
         await mcp_server.mcp.call_tool("get_position_details", {"ticker": "US0378331005"})
-        mock.get_ticker_details.assert_awaited_once_with("US0378331005")
+        mock.get_ticker_details.assert_awaited_once_with("US0378331005", include_position=True)
+
+    async def test_get_stock_analysis(self):
+        mock = _mock_client()
+        mcp_server = _patch_client(mock)
+        await mcp_server.mcp.call_tool("get_stock_analysis", {"ticker": "US0378331005"})
+        mock.get_stock_analysis.assert_awaited_once_with("US0378331005", include_position=False)
+
+    async def test_get_etf_analysis(self):
+        mock = _mock_client()
+        mcp_server = _patch_client(mock)
+        await mcp_server.mcp.call_tool("get_etf_analysis", {"ticker": "IE00B4L5Y983"})
+        mock.get_etf_analysis.assert_awaited_once_with("IE00B4L5Y983", include_position=False)
+
+    async def test_get_crypto_analysis(self):
+        mock = _mock_client()
+        mcp_server = _patch_client(mock)
+        await mcp_server.mcp.call_tool("get_crypto_analysis", {"ticker": "XC000A2P6LJ6"})
+        mock.get_crypto_analysis.assert_awaited_once_with("XC000A2P6LJ6", include_position=False)
 
     async def test_api_error_returns_structured_message(self):
         mcp_server = _fresh_import_mcp_server()
