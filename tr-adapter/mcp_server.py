@@ -25,6 +25,7 @@ from mcp_write import (
     require_confirmation,
     require_write_enabled,
 )
+from errors import raise_structured
 from redact import redact_secrets
 
 load_dotenv(Path(__file__).resolve().parent / ".env")
@@ -175,6 +176,7 @@ def log_tool_call(name: str) -> Callable[[F], F]:
 
 
 def _format_error(exc: Exception) -> str:
+    """Legacy human-readable string; prefer raise_structured for MCP tools."""
     if isinstance(exc, WriteToolsDisabledError):
         return f"Trade Republic write tools disabled: {exc}"
     if isinstance(exc, ConfirmationError):
@@ -197,6 +199,22 @@ def _format_error(exc: Exception) -> str:
 
 
 @mcp.tool()
+@log_tool_call("get_adapter_status")
+async def get_adapter_status() -> dict:
+    """Local adapter health for Hermes: session, circuit breaker, write flags.
+
+    Does not call Trade Republic. Use before retries when tools fail with
+    rate_limited / login_required, or after an uncertain watchlist write.
+    Respect retry_after_seconds — do not push-login during cooldown.
+    """
+    try:
+        return get_client().get_adapter_status()
+    except Exception as exc:
+        raise_structured(exc)
+        raise  # pragma: no cover
+
+
+@mcp.tool()
 @log_tool_call("get_account_summary")
 async def get_account_summary() -> dict:
     """Return account cash balances, buying power, and portfolio status.
@@ -208,7 +226,7 @@ async def get_account_summary() -> dict:
     try:
         return await get_client().get_balance_info()
     except Exception as exc:
-        raise RuntimeError(_format_error(exc)) from exc
+        raise_structured(exc)
 
 
 @mcp.tool()
@@ -223,7 +241,7 @@ async def list_active_positions() -> list:
     try:
         return await get_client().get_holdings()
     except Exception as exc:
-        raise RuntimeError(_format_error(exc)) from exc
+        raise_structured(exc)
 
 
 @mcp.tool()
@@ -241,7 +259,7 @@ async def get_position_details(ticker: str) -> dict:
         validated = TickerInput(ticker=ticker)
         return await get_client().get_ticker_details(validated.ticker, include_position=True)
     except Exception as exc:
-        raise RuntimeError(_format_error(exc)) from exc
+        raise_structured(exc)
 
 
 @mcp.tool()
@@ -263,7 +281,7 @@ async def get_stock_analysis(ticker: str, include_position: bool = False) -> dic
             include_position=include_position,
         )
     except Exception as exc:
-        raise RuntimeError(_format_error(exc)) from exc
+        raise_structured(exc)
 
 
 @mcp.tool()
@@ -284,7 +302,7 @@ async def get_etf_analysis(ticker: str, include_position: bool = False) -> dict:
             include_position=include_position,
         )
     except Exception as exc:
-        raise RuntimeError(_format_error(exc)) from exc
+        raise_structured(exc)
 
 
 @mcp.tool()
@@ -305,7 +323,7 @@ async def get_crypto_analysis(ticker: str, include_position: bool = False) -> di
             include_position=include_position,
         )
     except Exception as exc:
-        raise RuntimeError(_format_error(exc)) from exc
+        raise_structured(exc)
 
 
 @mcp.tool()
@@ -345,7 +363,7 @@ async def search_instruments(
             page_size=validated.page_size,
         )
     except Exception as exc:
-        raise RuntimeError(_format_error(exc)) from exc
+        raise_structured(exc)
 
 
 @mcp.tool()
@@ -372,7 +390,7 @@ async def get_price_history(
             exchange=validated.exchange,
         )
     except Exception as exc:
-        raise RuntimeError(_format_error(exc)) from exc
+        raise_structured(exc)
 
 
 @mcp.tool()
@@ -389,7 +407,7 @@ async def get_stock_news(ticker: str) -> dict:
         validated = TickerInput(ticker=ticker)
         return await get_client().get_stock_news(validated.ticker)
     except Exception as exc:
-        raise RuntimeError(_format_error(exc)) from exc
+        raise_structured(exc)
 
 
 @mcp.tool()
@@ -406,7 +424,7 @@ async def get_portfolio_history(range: str = "max") -> dict:
         validated = PortfolioHistoryInput(range=range)
         return await get_client().get_portfolio_history(validated.range)
     except Exception as exc:
-        raise RuntimeError(_format_error(exc)) from exc
+        raise_structured(exc)
 
 
 @mcp.tool()
@@ -419,7 +437,7 @@ async def get_watchlist() -> dict:
     try:
         return await get_client().get_watchlist()
     except Exception as exc:
-        raise RuntimeError(_format_error(exc)) from exc
+        raise_structured(exc)
 
 
 @mcp.tool()
@@ -440,7 +458,7 @@ async def get_recent_transactions(limit: int = 20, after: str | None = None) -> 
             after=validated.after,
         )
     except Exception as exc:
-        raise RuntimeError(_format_error(exc)) from exc
+        raise_structured(exc)
 
 
 async def _watchlist_mutation(
@@ -488,7 +506,7 @@ async def add_to_watchlist(
             confirm_token=confirm_token,
         )
     except Exception as exc:
-        raise RuntimeError(_format_error(exc)) from exc
+        raise_structured(exc)
 
 
 @mcp.tool()
@@ -519,7 +537,7 @@ async def remove_from_watchlist(
             confirm_token=confirm_token,
         )
     except Exception as exc:
-        raise RuntimeError(_format_error(exc)) from exc
+        raise_structured(exc)
 
 
 if __name__ == "__main__":
