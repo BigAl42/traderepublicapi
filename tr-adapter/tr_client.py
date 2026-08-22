@@ -43,6 +43,8 @@ from session import (  # noqa: E402
 
 LOGGER = logging.getLogger("tr_adapter.client")
 
+_DEFAULT_VERIFY_BACKOFF_SEC = 60
+
 
 class TradeRepublicClientError(Exception):
     """Human-readable adapter error for MCP tools."""
@@ -68,6 +70,15 @@ class TradeRepublicClientError(Exception):
             kind=classified.kind,
             retry_after_seconds=classified.retry_after_seconds,
         )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": "error",
+            "code": getattr(self.kind, "value", None) or ErrorKind.UNKNOWN.value,
+            "message": redact_secrets(str(self)),
+            "retryable": bool(self.retryable),
+            "retry_after_seconds": self.retry_after_seconds,
+        }
 
 
 class TradeRepublicClient:
@@ -98,6 +109,21 @@ class TradeRepublicClient:
         )
         self._last_read_at = 0.0
         self._read_lock = asyncio.Lock()
+        self._last_uncertain_write_at: float | None = None
+        self._last_uncertain_write_action: str | None = None
+        try:
+            self._write_verify_backoff_sec = max(
+                0,
+                int(
+                    os.getenv(
+                        "TR_MCP_WRITE_VERIFY_BACKOFF_SEC",
+                        str(_DEFAULT_VERIFY_BACKOFF_SEC),
+                    )
+                    or str(_DEFAULT_VERIFY_BACKOFF_SEC)
+                ),
+            )
+        except ValueError:
+            self._write_verify_backoff_sec = _DEFAULT_VERIFY_BACKOFF_SEC
 
     def _inject_token_on_api(self) -> None:
         if not self._token:
@@ -269,6 +295,97 @@ class TradeRepublicClient:
                 kind=ErrorKind.SESSION_EXPIRED,
                 retry_after_seconds=self._circuit.remaining_cooldown_seconds() or 60,
             )
+
+    def get_adapter_status(self) -> dict[str, Any]:
+        """Local adapter health — no Trade Republic network call."""
+        from mcp_write import write_enabled
+
+        cookies_path = Path(self._api.cookies_file)
+        cooldown = self._circuit.remaining_cooldown_seconds()
+        phone = bool(os.getenv("TR_PHONE", "").strip())
+        pin = bool(os.getenv("TR_PIN", "").strip())
+
+        uncertain_remaining = 0
+        if self._last_uncertain_write_at is not None:
+            elapsed = time.monotonic() - self._last_uncertain_write_at
+            uncertain_remaining = max(
+                0, int(self._write_verify_backoff_sec - elapsed)
+            )
+
+        if cooldown > 0:
+            guidance = (
+                "Auth circuit open — do not login or mutate. Wait "
+                f"{cooldown}s, then call get_adapter_status again."
+            )
+            overall = "cooldown"
+        elif uncertain_remaining > 0:
+            guidance = (
+                "Last watchlist write was unverified. Wait "
+                f"{uncertain_remaining}s before another mutation; "
+                "prefer get_watchlist to check state."
+            )
+            overall = "write_backoff"
+        elif self._session_ready:
+            guidance = "Session marked ready in-process. Prefer reads; mutate only with confirm_token."
+            overall = "ready"
+        elif cookies_path.is_file() or bool(self._token):
+            guidance = (
+                "Credentials/cookies present but session not warm in this process yet. "
+                "First authenticated read will try resume; or run check_login.py offline."
+            )
+            overall = "cold"
+        else:
+            guidance = (
+                "No warm session material. Set TR_TOKEN or run check_login.py with "
+                "TR_PHONE/TR_PIN, keep interactive login off in production."
+            )
+            overall = "unconfigured"
+
+        return {
+            "status": overall,
+            "session_ready": self._session_ready,
+            "has_token_env": bool(self._token),
+            "has_phone_pin_env": phone and pin,
+            "cookies_file": str(cookies_path),
+            "cookies_file_exists": cookies_path.is_file(),
+            "allow_interactive_login": self._allow_interactive_login,
+            "write_enabled": write_enabled(),
+            "auth_circuit_open": cooldown > 0,
+            "auth_cooldown_remaining_seconds": cooldown,
+            "retry_after_seconds": max(cooldown, uncertain_remaining) or None,
+            "write_verify_backoff_remaining_seconds": uncertain_remaining,
+            "last_uncertain_write_action": self._last_uncertain_write_action,
+            "guidance": guidance,
+        }
+
+    def _note_uncertain_write(self, action: str) -> dict[str, Any]:
+        self._last_uncertain_write_at = time.monotonic()
+        self._last_uncertain_write_action = action
+        return {
+            "retry_after_seconds": self._write_verify_backoff_sec,
+            "guidance": (
+                f"Do not retry {action} immediately. Call get_watchlist and/or "
+                "get_adapter_status, wait at least retry_after_seconds, then decide. "
+                "Avoid login storms during cooldown."
+            ),
+        }
+
+    def _guard_write_backoff(self, action: str) -> None:
+        if self._last_uncertain_write_at is None:
+            return
+        elapsed = time.monotonic() - self._last_uncertain_write_at
+        remaining = int(self._write_verify_backoff_sec - elapsed)
+        if remaining <= 0:
+            return
+        raise TradeRepublicClientError(
+            (
+                f"Write backoff active after unverified '{self._last_uncertain_write_action}'. "
+                f"Wait ~{remaining}s before '{action}'. Check get_watchlist / get_adapter_status."
+            ),
+            retryable=True,
+            kind=ErrorKind.SERVER,
+            retry_after_seconds=remaining,
+        )
 
     async def _throttle_read(self) -> None:
         """Light spacing between authenticated reads to reduce reconnect storms."""
@@ -646,9 +763,12 @@ class TradeRepublicClient:
     async def add_to_watchlist(self, ticker: str) -> dict[str, Any]:
         """Add an ISIN to the account watchlist (mutating, login required)."""
         isin = self._normalize_isin(ticker)
+        self._guard_write_backoff("add_to_watchlist")
         result = await self._query_auth(self._api.add_to_watchlist(isin), mutating=True)
         present = await self._verify_watchlist_membership(isin)
         if present is True:
+            self._last_uncertain_write_at = None
+            self._last_uncertain_write_action = None
             return {
                 "status": "completed",
                 "action": "add_to_watchlist",
@@ -665,6 +785,7 @@ class TradeRepublicClient:
                 "verified": False,
                 "message": "Add acknowledged but ISIN not found on watchlist",
                 "result": result,
+                **self._note_uncertain_write("add_to_watchlist"),
             }
         return {
             "status": "uncertain",
@@ -674,16 +795,20 @@ class TradeRepublicClient:
             "verified": None,
             "message": "Add sent but watchlist membership could not be verified",
             "result": result,
+            **self._note_uncertain_write("add_to_watchlist"),
         }
 
     async def remove_from_watchlist(self, ticker: str) -> dict[str, Any]:
         """Remove an ISIN from the account watchlist (mutating, login required)."""
         isin = self._normalize_isin(ticker)
+        self._guard_write_backoff("remove_from_watchlist")
         result = await self._query_auth(
             self._api.remove_from_watchlist(isin), mutating=True
         )
         present = await self._verify_watchlist_membership(isin)
         if present is False:
+            self._last_uncertain_write_at = None
+            self._last_uncertain_write_action = None
             return {
                 "status": "completed",
                 "action": "remove_from_watchlist",
@@ -700,6 +825,7 @@ class TradeRepublicClient:
                 "verified": False,
                 "message": "Remove acknowledged but ISIN still present on watchlist",
                 "result": result,
+                **self._note_uncertain_write("remove_from_watchlist"),
             }
         return {
             "status": "uncertain",
@@ -709,6 +835,7 @@ class TradeRepublicClient:
             "verified": None,
             "message": "Remove sent but watchlist absence could not be verified",
             "result": result,
+            **self._note_uncertain_write("remove_from_watchlist"),
         }
 
     async def instrument_label(self, ticker: str) -> str | None:

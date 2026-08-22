@@ -19,9 +19,15 @@ if str(ROOT) not in sys.path:
 
 def _fresh_import_mcp_server():
     for name in list(sys.modules):
-        if name in {"mcp_server", "tr_client", "tr_adapter_mcp_server", "mcp_write", "redact", "session"} or name.startswith(
-            "mcp_server."
-        ):
+        if name in {
+            "mcp_server",
+            "tr_client",
+            "tr_adapter_mcp_server",
+            "mcp_write",
+            "redact",
+            "session",
+            "errors",
+        } or name.startswith("mcp_server."):
             del sys.modules[name]
     import mcp_server
 
@@ -87,6 +93,15 @@ def _mock_client() -> MagicMock:
         "transactions": [{"type": "timelineEvent", "title": "Buy"}],
     })
     mock.instrument_label = AsyncMock(return_value="Apple Inc.")
+    mock.get_adapter_status = MagicMock(
+        return_value={
+            "status": "cold",
+            "session_ready": False,
+            "write_enabled": False,
+            "auth_circuit_open": False,
+            "guidance": "test",
+        }
+    )
     mock.add_to_watchlist = AsyncMock(return_value={"status": "completed", "ticker": "US0378331005"})
     mock.remove_from_watchlist = AsyncMock(return_value={"status": "completed", "ticker": "US0378331005"})
     return mock
@@ -105,6 +120,13 @@ class RootMcpServerTest(unittest.IsolatedAsyncioTestCase):
         result = await mcp_server.mcp.call_tool("get_account_summary", {})
         self.assertTrue(result)
         mock.get_balance_info.assert_awaited_once()
+
+    async def test_get_adapter_status(self):
+        mock = _mock_client()
+        mcp_server = _patch_client(mock)
+        result = await mcp_server.mcp.call_tool("get_adapter_status", {})
+        self.assertTrue(result)
+        mock.get_adapter_status.assert_called_once()
 
     async def test_list_active_positions(self):
         mock = _mock_client()
