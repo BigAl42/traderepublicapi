@@ -6,7 +6,7 @@ Use it to read cash/portfolio, search instruments, stream quotes, export the tim
 
 Login uses the current **web app** flow: phone + PIN, then confirm the push in the Trade Republic app. The official app stays logged in. Capability matrix: [docs/API.md](docs/API.md).
 
-Hermes / MCP adapter (read-first, watchlist writes optional): [tr-adapter/README.md](tr-adapter/README.md).
+Hermes / MCP adapter (read-first, watchlist writes optional): [tr-adapter/README.md](tr-adapter/README.md) · [Hermes ops](tr-adapter/HERMES.md)
 
 ## Install
 
