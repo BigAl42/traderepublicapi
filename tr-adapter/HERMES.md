@@ -15,7 +15,7 @@ After config change or image update:
    python3 smoke_mcp.py --stdio
    ```
 
-   Expect **15 tools** and OK for `get_adapter_status`, `get_account_summary`,
+   Expect **26 tools** and OK for `get_adapter_status`, `get_account_summary`,
    `search_instruments`.
 
 4. Optional live read smoke (credentials required):
@@ -39,7 +39,7 @@ Warm session offline — not from agent login loops:
 python3 check_login.py
 ```
 
-## MCP tools (15)
+## MCP tools (26)
 
 | Tool | Auth | Notes |
 |------|------|--------|
@@ -55,7 +55,18 @@ python3 check_login.py
 | `get_stock_news` | no | News |
 | `get_portfolio_history` | yes | Depot history |
 | `get_watchlist` | yes | Watchlist |
-| `get_recent_transactions` | yes | Timeline subset |
+| `get_recent_transactions` | yes | Cash-relevant timeline subset |
+| `get_full_timeline` | yes | Full timeline (broader) |
+| `get_transaction_detail` | yes | Event detail / documents |
+| `list_open_orders` | yes | Open (or terminated) orders |
+| `list_savings_plans` | yes | Savings plans |
+| `list_price_alarms` | yes | Price alarms |
+| `get_live_quote` | no | One-shot live quote |
+| `get_derivatives` | yes | Warrants / KOs / factors |
+| `get_instrument_suitability` | yes | Pre-trade suitability |
+| `get_order_preview` | yes | Price + available size (no order) |
+| `get_account_settings` | yes | Account settings |
+| `get_account_pairs` | yes | Depot / cash account numbers |
 | `add_to_watchlist` | yes + write flag | Mutating; confirm_token flow |
 | `remove_from_watchlist` | yes + write flag | Mutating; confirm_token flow |
 
@@ -100,6 +111,9 @@ Only when `TR_MCP_WRITE_ENABLED=1` and user explicitly asked:
 1. `get_adapter_status` (if prior errors)
 2. `get_account_summary`
 3. `list_active_positions` / `get_position_details` as needed
+4. `list_open_orders` / `list_savings_plans` / `list_price_alarms` when relevant
+5. `get_live_quote` / `get_order_preview` / `get_derivatives` for research & pre-trade
+6. `get_recent_transactions` or `get_full_timeline`; then `get_transaction_detail` for docs
 
 ## Troubleshooting
 

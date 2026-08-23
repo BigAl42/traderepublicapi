@@ -92,6 +92,28 @@ def _mock_client() -> MagicMock:
         "count": 1,
         "transactions": [{"type": "timelineEvent", "title": "Buy"}],
     })
+    mock.get_full_timeline = AsyncMock(return_value={
+        "limit": 20,
+        "count": 1,
+        "events": [{"id": "evt-1", "type": "timelineEvent", "title": "Buy"}],
+    })
+    mock.get_transaction_detail = AsyncMock(return_value={
+        "event_id": "evt-1",
+        "detail": {"titleText": "Buy Apple"},
+    })
+    mock.list_open_orders = AsyncMock(return_value={
+        "include_terminated": False,
+        "count": 1,
+        "orders": [{"id": "ord-1", "isin": "US0378331005"}],
+    })
+    mock.list_savings_plans = AsyncMock(return_value={
+        "count": 1,
+        "savings_plans": [{"id": "sp-1", "isin": "IE00B4L5Y983"}],
+    })
+    mock.list_price_alarms = AsyncMock(return_value={
+        "count": 1,
+        "price_alarms": [{"id": "pa-1", "isin": "US0378331005"}],
+    })
     mock.instrument_label = AsyncMock(return_value="Apple Inc.")
     mock.get_adapter_status = MagicMock(
         return_value={
@@ -197,6 +219,36 @@ class RootMcpServerTest(unittest.IsolatedAsyncioTestCase):
         mcp_server = _patch_client(mock)
         await mcp_server.mcp.call_tool("get_recent_transactions", {"limit": 5})
         mock.get_recent_transactions.assert_awaited_once_with(limit=5, after=None)
+
+    async def test_get_full_timeline(self):
+        mock = _mock_client()
+        mcp_server = _patch_client(mock)
+        await mcp_server.mcp.call_tool("get_full_timeline", {"limit": 5})
+        mock.get_full_timeline.assert_awaited_once_with(limit=5, after=None)
+
+    async def test_get_transaction_detail(self):
+        mock = _mock_client()
+        mcp_server = _patch_client(mock)
+        await mcp_server.mcp.call_tool("get_transaction_detail", {"event_id": "evt-1"})
+        mock.get_transaction_detail.assert_awaited_once_with("evt-1")
+
+    async def test_list_open_orders(self):
+        mock = _mock_client()
+        mcp_server = _patch_client(mock)
+        await mcp_server.mcp.call_tool("list_open_orders", {"include_terminated": True})
+        mock.list_open_orders.assert_awaited_once_with(include_terminated=True)
+
+    async def test_list_savings_plans(self):
+        mock = _mock_client()
+        mcp_server = _patch_client(mock)
+        await mcp_server.mcp.call_tool("list_savings_plans", {})
+        mock.list_savings_plans.assert_awaited_once()
+
+    async def test_list_price_alarms(self):
+        mock = _mock_client()
+        mcp_server = _patch_client(mock)
+        await mcp_server.mcp.call_tool("list_price_alarms", {})
+        mock.list_price_alarms.assert_awaited_once()
 
     async def test_add_to_watchlist_confirmation(self):
         from unittest.mock import patch

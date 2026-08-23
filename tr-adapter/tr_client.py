@@ -850,15 +850,31 @@ class TradeRepublicClient:
         return None
 
     @staticmethod
-    def _extract_timeline_items(payload: Any) -> list[Any]:
+    def _extract_list(payload: Any, *preferred_keys: str) -> list[Any]:
         if isinstance(payload, list):
             return payload
         if isinstance(payload, dict):
-            for key in ("data", "items", "events", "timeline", "results"):
+            for key in preferred_keys:
+                value = payload.get(key)
+                if isinstance(value, list):
+                    return value
+            for key in ("data", "items", "results"):
                 value = payload.get(key)
                 if isinstance(value, list):
                     return value
         return []
+
+    @classmethod
+    def _extract_timeline_items(cls, payload: Any) -> list[Any]:
+        return cls._extract_list(payload, "events", "timeline", "data", "items", "results")
+
+    def _validate_limit(self, limit: int) -> None:
+        if limit < 1 or limit > 100:
+            raise TradeRepublicClientError(
+                "limit must be between 1 and 100",
+                retryable=False,
+                kind=ErrorKind.CONFIG,
+            )
 
     async def get_recent_transactions(
         self,
@@ -866,12 +882,7 @@ class TradeRepublicClient:
         after: str | None = None,
     ) -> dict[str, Any]:
         """Recent account transactions from timeline (login required)."""
-        if limit < 1 or limit > 100:
-            raise TradeRepublicClientError(
-                "limit must be between 1 and 100",
-                retryable=False,
-                kind=ErrorKind.CONFIG,
-            )
+        self._validate_limit(limit)
         raw = await self._query_auth(self._api.timeline_transactions(after=after))
         items = self._extract_timeline_items(raw)
         return {
@@ -880,3 +891,150 @@ class TradeRepublicClient:
             "count": min(len(items), limit),
             "transactions": items[:limit],
         }
+
+    async def get_full_timeline(
+        self,
+        limit: int = 20,
+        after: str | None = None,
+    ) -> dict[str, Any]:
+        """Full account timeline (broader than cash-relevant transactions)."""
+        self._validate_limit(limit)
+        raw = await self._query_auth(self._api.timeline(after=after))
+        items = self._extract_timeline_items(raw)
+        next_cursor = None
+        if isinstance(raw, dict):
+            next_cursor = raw.get("cursors", {}).get("after") if isinstance(
+                raw.get("cursors"), dict
+            ) else raw.get("after")
+        return {
+            "after": after,
+            "next_after": next_cursor,
+            "limit": limit,
+            "count": min(len(items), limit),
+            "events": items[:limit],
+        }
+
+    async def get_transaction_detail(self, event_id: str) -> dict[str, Any]:
+        """Timeline event detail (documents, tax info) via timelineDetailV2."""
+        cleaned = (event_id or "").strip()
+        if not cleaned:
+            raise TradeRepublicClientError(
+                "event_id must not be empty",
+                retryable=False,
+                kind=ErrorKind.CONFIG,
+            )
+        detail = await self._query_auth(self._api.timeline_detail_v2(cleaned))
+        return {"event_id": cleaned, "detail": detail}
+
+    async def list_open_orders(self, *, include_terminated: bool = False) -> dict[str, Any]:
+        """Open (or optionally terminated) orders for the account."""
+        raw = await self._query_auth(self._api.orders(terminated=include_terminated))
+        orders = self._extract_list(raw, "orders", "data", "items")
+        return {
+            "include_terminated": include_terminated,
+            "count": len(orders),
+            "orders": orders,
+        }
+
+    async def list_savings_plans(self) -> dict[str, Any]:
+        """Active savings plans for the account."""
+        raw = await self._query_auth(self._api.savings_plans())
+        plans = self._extract_list(raw, "savingsPlans", "plans", "data", "items")
+        return {"count": len(plans), "savings_plans": plans}
+
+    async def list_price_alarms(self) -> dict[str, Any]:
+        """Active price alarms for the account."""
+        raw = await self._query_auth(self._api.price_alarms())
+        alarms = self._extract_list(raw, "priceAlarms", "alarms", "data", "items")
+        return {"count": len(alarms), "price_alarms": alarms}
+
+    PRODUCT_CATEGORIES = TRApi.product_category_list
+    ORDER_TYPES = TRApi.order_type_list
+
+    def _validate_exchange(self, exchange: str) -> str:
+        cleaned = (exchange or "").strip().upper()
+        if cleaned not in self.EXCHANGES:
+            raise TradeRepublicClientError(
+                f"exchange must be one of {self.EXCHANGES}",
+                retryable=False,
+                kind=ErrorKind.CONFIG,
+            )
+        return cleaned
+
+    async def get_live_quote(
+        self,
+        ticker: str,
+        exchange: str = "LSX",
+    ) -> dict[str, Any]:
+        """One-shot live quote snapshot from the ticker stream (no login required)."""
+        isin = self._normalize_isin(ticker)
+        exchange = self._validate_exchange(exchange)
+        quote = await self._query_public(self._api.ticker(isin, exchange=exchange))
+        return {"ticker": isin, "exchange": exchange, "quote": quote}
+
+    async def get_derivatives(
+        self,
+        ticker: str,
+        product_category: str = "vanillaWarrant",
+    ) -> dict[str, Any]:
+        """Derivatives (warrants / knock-outs / factors) for an underlying ISIN."""
+        isin = self._normalize_isin(ticker)
+        category = (product_category or "").strip()
+        if category not in self.PRODUCT_CATEGORIES:
+            raise TradeRepublicClientError(
+                f"product_category must be one of {self.PRODUCT_CATEGORIES}",
+                retryable=False,
+                kind=ErrorKind.CONFIG,
+            )
+        raw = await self._query_auth(self._api.derivatives(isin, category))
+        items = self._extract_list(raw, "derivatives", "instruments", "data", "items", "results")
+        return {
+            "ticker": isin,
+            "product_category": category,
+            "count": len(items),
+            "derivatives": items,
+        }
+
+    async def get_instrument_suitability(self, ticker: str) -> dict[str, Any]:
+        """Suitability / compliance info for an instrument (pre-trade)."""
+        isin = self._normalize_isin(ticker)
+        suitability = await self._query_auth(self._api.instrument_suitability(isin))
+        return {"ticker": isin, "suitability": suitability}
+
+    async def get_order_preview(
+        self,
+        ticker: str,
+        order_type: str = "buy",
+        exchange: str = "LSX",
+    ) -> dict[str, Any]:
+        """Read-only pre-trade preview: indicative price and available size."""
+        isin = self._normalize_isin(ticker)
+        exchange = self._validate_exchange(exchange)
+        side = (order_type or "").strip().lower()
+        if side not in self.ORDER_TYPES:
+            raise TradeRepublicClientError(
+                f"order_type must be one of {self.ORDER_TYPES}",
+                retryable=False,
+                kind=ErrorKind.CONFIG,
+            )
+        price = await self._query_auth(
+            self._api.price_for_order(isin, exchange=exchange, order_type=side)
+        )
+        size = await self._query_auth(self._api.available_size(isin, exchange=exchange))
+        return {
+            "ticker": isin,
+            "exchange": exchange,
+            "order_type": side,
+            "price": price,
+            "available_size": size,
+        }
+
+    async def get_account_settings(self) -> dict[str, Any]:
+        """Account settings for the logged-in user."""
+        settings = await self._query_auth(self._api.settings())
+        return {"settings": settings}
+
+    async def get_account_pairs(self) -> dict[str, Any]:
+        """Securities/cash account numbers including tax wrappers."""
+        pairs = await self._query_auth(self._api.account_pairs())
+        return {"account_pairs": pairs}

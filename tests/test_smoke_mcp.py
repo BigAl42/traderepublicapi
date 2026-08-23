@@ -16,9 +16,16 @@ from smoke_tools import EXPECTED_MCP_TOOLS, build_mock_client, run_stdio_smoke  
 
 class SmokeToolsTest(unittest.TestCase):
     def test_expected_tool_count(self):
-        self.assertEqual(len(EXPECTED_MCP_TOOLS), 15)
+        self.assertEqual(len(EXPECTED_MCP_TOOLS), 26)
         self.assertIn("get_adapter_status", EXPECTED_MCP_TOOLS)
         self.assertIn("add_to_watchlist", EXPECTED_MCP_TOOLS)
+        self.assertIn("get_transaction_detail", EXPECTED_MCP_TOOLS)
+        self.assertIn("list_open_orders", EXPECTED_MCP_TOOLS)
+        self.assertIn("list_savings_plans", EXPECTED_MCP_TOOLS)
+        self.assertIn("list_price_alarms", EXPECTED_MCP_TOOLS)
+        self.assertIn("get_live_quote", EXPECTED_MCP_TOOLS)
+        self.assertIn("get_order_preview", EXPECTED_MCP_TOOLS)
+        self.assertIn("get_account_pairs", EXPECTED_MCP_TOOLS)
 
     def test_mock_client_has_status(self):
         mock = build_mock_client()

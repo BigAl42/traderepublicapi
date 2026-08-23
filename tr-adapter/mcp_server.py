@@ -130,6 +130,62 @@ class TransactionsInput(BaseModel):
     after: str | None = Field(default=None, description="Optional pagination cursor")
 
 
+class TimelineInput(BaseModel):
+    """Parameters for the full account timeline."""
+
+    limit: int = Field(default=20, ge=1, le=100, description="Max number of events to return")
+    after: str | None = Field(default=None, description="Optional pagination cursor")
+
+
+class TransactionDetailInput(BaseModel):
+    """Parameters for a single timeline event detail."""
+
+    event_id: str = Field(..., min_length=1, max_length=200, description="Timeline event id")
+
+
+class OpenOrdersInput(BaseModel):
+    """Parameters for listing orders."""
+
+    include_terminated: bool = Field(
+        default=False,
+        description="When true, include filled/cancelled orders; default is open only",
+    )
+
+
+class LiveQuoteInput(BaseModel):
+    """Parameters for a one-shot live quote."""
+
+    ticker: Annotated[str, BeforeValidator(_normalize_ticker)] = Field(
+        ...,
+        description="ISIN, e.g. US0378331005",
+    )
+    exchange: str = Field(default="LSX", description="Exchange: LSX, TDG, LUS, TUB, BHS, B2C")
+
+
+class DerivativesInput(BaseModel):
+    """Parameters for listing derivatives on an underlying."""
+
+    ticker: Annotated[str, BeforeValidator(_normalize_ticker)] = Field(
+        ...,
+        description="Underlying ISIN, e.g. US0378331005",
+    )
+    product_category: str = Field(
+        default="vanillaWarrant",
+        description="Product category: vanillaWarrant, knockOutProduct, or factor",
+    )
+
+
+class OrderPreviewInput(BaseModel):
+    """Parameters for a read-only pre-trade order preview."""
+
+    ticker: Annotated[str, BeforeValidator(_normalize_ticker)] = Field(
+        ...,
+        description="ISIN, e.g. US0378331005",
+    )
+    order_type: str = Field(default="buy", description="Order side: buy or sell")
+    exchange: str = Field(default="LSX", description="Exchange: LSX, TDG, LUS, TUB, BHS, B2C")
+
+
 def log_tool_call(name: str) -> Callable[[F], F]:
     def decorator(func: F) -> F:
         if asyncio.iscoroutinefunction(func):
@@ -432,6 +488,211 @@ async def get_recent_transactions(limit: int = 20, after: str | None = None) -> 
             limit=validated.limit,
             after=validated.after,
         )
+    except Exception as exc:
+        raise_structured(exc)
+
+
+@mcp.tool()
+@log_tool_call("get_full_timeline")
+async def get_full_timeline(limit: int = 20, after: str | None = None) -> dict:
+    """Return the full account timeline (broader than cash transactions).
+
+    Includes activity beyond the cash-relevant subset (e.g. status events).
+    Use event ids with get_transaction_detail for documents/tax info.
+    Requires login. Read-only.
+
+    Args:
+        limit: Maximum number of events to return (1–100, default 20).
+        after: Optional pagination cursor for older events.
+    """
+    try:
+        validated = TimelineInput(limit=limit, after=after)
+        return await get_client().get_full_timeline(
+            limit=validated.limit,
+            after=validated.after,
+        )
+    except Exception as exc:
+        raise_structured(exc)
+
+
+@mcp.tool()
+@log_tool_call("get_transaction_detail")
+async def get_transaction_detail(event_id: str) -> dict:
+    """Return detail for one timeline event (documents, tax breakdown, etc.).
+
+    Pass the event id from get_recent_transactions or get_full_timeline.
+    Requires login. Read-only.
+
+    Args:
+        event_id: Timeline event id.
+    """
+    try:
+        validated = TransactionDetailInput(event_id=event_id)
+        return await get_client().get_transaction_detail(validated.event_id)
+    except Exception as exc:
+        raise_structured(exc)
+
+
+@mcp.tool()
+@log_tool_call("list_open_orders")
+async def list_open_orders(include_terminated: bool = False) -> dict:
+    """List orders for the logged-in account.
+
+    By default returns open orders only. Set include_terminated=true for
+    filled/cancelled history. Does not create or cancel orders. Requires login.
+    Read-only.
+
+    Args:
+        include_terminated: Include terminated orders when true.
+    """
+    try:
+        validated = OpenOrdersInput(include_terminated=include_terminated)
+        return await get_client().list_open_orders(
+            include_terminated=validated.include_terminated,
+        )
+    except Exception as exc:
+        raise_structured(exc)
+
+
+@mcp.tool()
+@log_tool_call("list_savings_plans")
+async def list_savings_plans() -> dict:
+    """List savings plans for the logged-in account.
+
+    Requires login. Read-only — does not create, change, or cancel plans.
+    """
+    try:
+        return await get_client().list_savings_plans()
+    except Exception as exc:
+        raise_structured(exc)
+
+
+@mcp.tool()
+@log_tool_call("list_price_alarms")
+async def list_price_alarms() -> dict:
+    """List active price alarms for the logged-in account.
+
+    Requires login. Read-only — does not create or cancel alarms.
+    """
+    try:
+        return await get_client().list_price_alarms()
+    except Exception as exc:
+        raise_structured(exc)
+
+
+@mcp.tool()
+@log_tool_call("get_live_quote")
+async def get_live_quote(ticker: str, exchange: str = "LSX") -> dict:
+    """Return a one-shot live quote snapshot for an ISIN.
+
+    Uses the ticker stream but returns a single snapshot (not a continuous stream).
+    Does not require login. Read-only.
+
+    Args:
+        ticker: ISIN (e.g. US0378331005).
+        exchange: Trading venue (default LSX).
+    """
+    try:
+        validated = LiveQuoteInput(ticker=ticker, exchange=exchange)
+        return await get_client().get_live_quote(
+            validated.ticker,
+            exchange=validated.exchange,
+        )
+    except Exception as exc:
+        raise_structured(exc)
+
+
+@mcp.tool()
+@log_tool_call("get_derivatives")
+async def get_derivatives(ticker: str, product_category: str = "vanillaWarrant") -> dict:
+    """List derivatives (warrants, knock-outs, factors) for an underlying ISIN.
+
+    Requires login. Read-only.
+
+    Args:
+        ticker: Underlying ISIN.
+        product_category: vanillaWarrant, knockOutProduct, or factor.
+    """
+    try:
+        validated = DerivativesInput(ticker=ticker, product_category=product_category)
+        return await get_client().get_derivatives(
+            validated.ticker,
+            product_category=validated.product_category,
+        )
+    except Exception as exc:
+        raise_structured(exc)
+
+
+@mcp.tool()
+@log_tool_call("get_instrument_suitability")
+async def get_instrument_suitability(ticker: str) -> dict:
+    """Return suitability / compliance information for an instrument.
+
+    Useful as a pre-trade check. Requires login. Read-only.
+
+    Args:
+        ticker: ISIN of the instrument.
+    """
+    try:
+        validated = TickerInput(ticker=ticker)
+        return await get_client().get_instrument_suitability(validated.ticker)
+    except Exception as exc:
+        raise_structured(exc)
+
+
+@mcp.tool()
+@log_tool_call("get_order_preview")
+async def get_order_preview(
+    ticker: str,
+    order_type: str = "buy",
+    exchange: str = "LSX",
+) -> dict:
+    """Return a read-only pre-trade preview (indicative price and available size).
+
+    Does not place an order. Requires login. Read-only.
+
+    Args:
+        ticker: ISIN of the instrument.
+        order_type: buy or sell.
+        exchange: Trading venue (default LSX).
+    """
+    try:
+        validated = OrderPreviewInput(
+            ticker=ticker,
+            order_type=order_type,
+            exchange=exchange,
+        )
+        return await get_client().get_order_preview(
+            validated.ticker,
+            order_type=validated.order_type,
+            exchange=validated.exchange,
+        )
+    except Exception as exc:
+        raise_structured(exc)
+
+
+@mcp.tool()
+@log_tool_call("get_account_settings")
+async def get_account_settings() -> dict:
+    """Return account settings for the logged-in user.
+
+    Requires login. Read-only.
+    """
+    try:
+        return await get_client().get_account_settings()
+    except Exception as exc:
+        raise_structured(exc)
+
+
+@mcp.tool()
+@log_tool_call("get_account_pairs")
+async def get_account_pairs() -> dict:
+    """Return securities/cash account numbers including tax wrappers.
+
+    Requires login. Read-only.
+    """
+    try:
+        return await get_client().get_account_pairs()
     except Exception as exc:
         raise_structured(exc)
 

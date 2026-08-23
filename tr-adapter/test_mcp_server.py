@@ -95,6 +95,51 @@ def _mock_client() -> MagicMock:
         "count": 1,
         "transactions": [{"type": "timelineEvent", "title": "Buy"}],
     })
+    mock.get_full_timeline = AsyncMock(return_value={
+        "limit": 20,
+        "count": 1,
+        "events": [{"id": "evt-1", "type": "timelineEvent", "title": "Buy"}],
+    })
+    mock.get_transaction_detail = AsyncMock(return_value={
+        "event_id": "evt-1",
+        "detail": {"titleText": "Buy Apple"},
+    })
+    mock.list_open_orders = AsyncMock(return_value={
+        "include_terminated": False,
+        "count": 1,
+        "orders": [{"id": "ord-1", "isin": "US0378331005"}],
+    })
+    mock.list_savings_plans = AsyncMock(return_value={
+        "count": 1,
+        "savings_plans": [{"id": "sp-1", "isin": "IE00B4L5Y983"}],
+    })
+    mock.list_price_alarms = AsyncMock(return_value={
+        "count": 1,
+        "price_alarms": [{"id": "pa-1", "isin": "US0378331005"}],
+    })
+    mock.get_live_quote = AsyncMock(return_value={
+        "ticker": "US0378331005",
+        "exchange": "LSX",
+        "quote": {"bid": 100.0, "ask": 100.1},
+    })
+    mock.get_derivatives = AsyncMock(return_value={
+        "ticker": "US0378331005",
+        "product_category": "vanillaWarrant",
+        "count": 1,
+        "derivatives": [{"isin": "DE000ABC"}],
+    })
+    mock.get_instrument_suitability = AsyncMock(return_value={
+        "ticker": "US0378331005",
+        "suitability": {"suitable": True},
+    })
+    mock.get_order_preview = AsyncMock(return_value={
+        "ticker": "US0378331005",
+        "order_type": "buy",
+        "price": {"price": 100.0},
+        "available_size": {"size": 10},
+    })
+    mock.get_account_settings = AsyncMock(return_value={"settings": {"locale": "de"}})
+    mock.get_account_pairs = AsyncMock(return_value={"account_pairs": [{"secAccNo": "1"}]})
     mock.instrument_label = AsyncMock(return_value="Apple Inc.")
     mock.get_adapter_status = MagicMock(
         return_value={
@@ -180,6 +225,42 @@ class TradeRepublicClientTest(unittest.TestCase):
             TradeRepublicClient._extract_timeline_items({"data": events}),
             events,
         )
+
+    def test_extract_list_preferred_keys(self):
+        from tr_client import TradeRepublicClient
+
+        orders = [{"id": "o1"}]
+        self.assertEqual(
+            TradeRepublicClient._extract_list({"orders": orders}, "orders"),
+            orders,
+        )
+        self.assertEqual(TradeRepublicClient._extract_list(None, "orders"), [])
+
+    def test_get_transaction_detail_rejects_empty_id(self):
+        from tr_client import TradeRepublicClient, TradeRepublicClientError
+
+        client = TradeRepublicClient(token="offline")
+
+        async def _call():
+            await client.get_transaction_detail("  ")
+
+        with self.assertRaises(TradeRepublicClientError) as ctx:
+            asyncio.run(_call())
+        self.assertIn("event_id", str(ctx.exception).lower())
+
+
+
+    def test_get_order_preview_rejects_bad_side(self):
+        from tr_client import TradeRepublicClient, TradeRepublicClientError
+
+        client = TradeRepublicClient(token="offline")
+
+        async def _call():
+            await client.get_order_preview("US0378331005", order_type="hold")
+
+        with self.assertRaises(TradeRepublicClientError) as ctx:
+            asyncio.run(_call())
+        self.assertIn("order_type", str(ctx.exception).lower())
 
 
 class McpToolsTest(unittest.IsolatedAsyncioTestCase):
@@ -299,6 +380,84 @@ class McpToolsTest(unittest.IsolatedAsyncioTestCase):
         mcp_server = _patch_client(mock)
         await mcp_server.mcp.call_tool("get_recent_transactions", {"limit": 10})
         mock.get_recent_transactions.assert_awaited_once_with(limit=10, after=None)
+
+    async def test_get_full_timeline(self):
+        mock = _mock_client()
+        mcp_server = _patch_client(mock)
+        await mcp_server.mcp.call_tool("get_full_timeline", {"limit": 5})
+        mock.get_full_timeline.assert_awaited_once_with(limit=5, after=None)
+
+    async def test_get_transaction_detail(self):
+        mock = _mock_client()
+        mcp_server = _patch_client(mock)
+        await mcp_server.mcp.call_tool("get_transaction_detail", {"event_id": "evt-1"})
+        mock.get_transaction_detail.assert_awaited_once_with("evt-1")
+
+    async def test_list_open_orders(self):
+        mock = _mock_client()
+        mcp_server = _patch_client(mock)
+        await mcp_server.mcp.call_tool("list_open_orders", {})
+        mock.list_open_orders.assert_awaited_once_with(include_terminated=False)
+
+    async def test_list_savings_plans(self):
+        mock = _mock_client()
+        mcp_server = _patch_client(mock)
+        await mcp_server.mcp.call_tool("list_savings_plans", {})
+        mock.list_savings_plans.assert_awaited_once()
+
+    async def test_list_price_alarms(self):
+        mock = _mock_client()
+        mcp_server = _patch_client(mock)
+        await mcp_server.mcp.call_tool("list_price_alarms", {})
+        mock.list_price_alarms.assert_awaited_once()
+
+    async def test_get_live_quote(self):
+        mock = _mock_client()
+        mcp_server = _patch_client(mock)
+        await mcp_server.mcp.call_tool("get_live_quote", {"ticker": "US0378331005"})
+        mock.get_live_quote.assert_awaited_once_with("US0378331005", exchange="LSX")
+
+    async def test_get_derivatives(self):
+        mock = _mock_client()
+        mcp_server = _patch_client(mock)
+        await mcp_server.mcp.call_tool(
+            "get_derivatives",
+            {"ticker": "US0378331005", "product_category": "knockOutProduct"},
+        )
+        mock.get_derivatives.assert_awaited_once_with(
+            "US0378331005", product_category="knockOutProduct"
+        )
+
+    async def test_get_instrument_suitability(self):
+        mock = _mock_client()
+        mcp_server = _patch_client(mock)
+        await mcp_server.mcp.call_tool(
+            "get_instrument_suitability", {"ticker": "US0378331005"}
+        )
+        mock.get_instrument_suitability.assert_awaited_once_with("US0378331005")
+
+    async def test_get_order_preview(self):
+        mock = _mock_client()
+        mcp_server = _patch_client(mock)
+        await mcp_server.mcp.call_tool(
+            "get_order_preview",
+            {"ticker": "US0378331005", "order_type": "sell"},
+        )
+        mock.get_order_preview.assert_awaited_once_with(
+            "US0378331005", order_type="sell", exchange="LSX"
+        )
+
+    async def test_get_account_settings(self):
+        mock = _mock_client()
+        mcp_server = _patch_client(mock)
+        await mcp_server.mcp.call_tool("get_account_settings", {})
+        mock.get_account_settings.assert_awaited_once()
+
+    async def test_get_account_pairs(self):
+        mock = _mock_client()
+        mcp_server = _patch_client(mock)
+        await mcp_server.mcp.call_tool("get_account_pairs", {})
+        mock.get_account_pairs.assert_awaited_once()
 
 
 class WatchlistWriteTest(unittest.IsolatedAsyncioTestCase):
