@@ -19,6 +19,14 @@ python3 check_login.py
 # or: python3 check_login.py --env tr-adapter/.env
 ```
 
+After deploy, verify MCP plumbing (no account):
+
+```bash
+python3 smoke_mcp.py --stdio
+```
+
+Hermes agent rules and deploy checklist: [HERMES.md](HERMES.md).
+
 ## Ops: cooldown and status
 
 When Trade Republic rate-limits auth, the adapter opens a file-backed circuit
