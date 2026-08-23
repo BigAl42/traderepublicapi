@@ -106,6 +106,16 @@ class SearchInstrumentsInput(BaseModel):
     page_size: int = Field(default=20, ge=1, le=100, description="Results per page")
 
 
+class SearchSuggestedTagsInput(BaseModel):
+    """Parameters for neon search tag suggestions."""
+
+    query: str = Field(
+        default="",
+        max_length=200,
+        description="Partial search text; empty returns general suggestions",
+    )
+
+
 class PriceHistoryInput(BaseModel):
     """Parameters for aggregate price history."""
 
@@ -393,6 +403,77 @@ async def search_instruments(
             page=validated.page,
             page_size=validated.page_size,
         )
+    except Exception as exc:
+        raise_structured(exc)
+
+
+@mcp.tool()
+@log_tool_call("search_instruments_aggregations")
+async def search_instruments_aggregations(
+    query: str,
+    instrument_type: str = "stock",
+    jurisdiction: str = "DE",
+    page: int = 1,
+    page_size: int = 20,
+) -> dict:
+    """Return faceted search aggregations (category counts) for a query.
+
+    Complements search_instruments with bucketed result counts. No login required.
+    Read-only.
+
+    Args:
+        query: Search text (e.g. "Apple", "semiconductor").
+        instrument_type: One of stock, fund, derivative, crypto.
+        jurisdiction: Country filter (DE, AT, FR, …).
+        page: Result page, starting at 1.
+        page_size: Number of results per page (max 100).
+    """
+    try:
+        validated = SearchInstrumentsInput(
+            query=query,
+            instrument_type=instrument_type,
+            jurisdiction=jurisdiction,
+            page=page,
+            page_size=page_size,
+        )
+        return await get_client().search_instruments_aggregations(
+            query=validated.query,
+            instrument_type=validated.instrument_type,
+            jurisdiction=validated.jurisdiction,
+            page=validated.page,
+            page_size=validated.page_size,
+        )
+    except Exception as exc:
+        raise_structured(exc)
+
+
+@mcp.tool()
+@log_tool_call("get_search_tags")
+async def get_search_tags() -> dict:
+    """Return available neon search tags.
+
+    Useful for discovering filter facets before searching. No login required.
+    Read-only.
+    """
+    try:
+        return await get_client().get_search_tags()
+    except Exception as exc:
+        raise_structured(exc)
+
+
+@mcp.tool()
+@log_tool_call("get_search_suggested_tags")
+async def get_search_suggested_tags(query: str = "") -> dict:
+    """Return suggested search tags for a partial query.
+
+    Pass an empty query for general suggestions. No login required. Read-only.
+
+    Args:
+        query: Partial search text (e.g. "App" → Apple-related tags).
+    """
+    try:
+        validated = SearchSuggestedTagsInput(query=query)
+        return await get_client().get_search_suggested_tags(validated.query)
     except Exception as exc:
         raise_structured(exc)
 

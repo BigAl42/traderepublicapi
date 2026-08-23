@@ -15,7 +15,7 @@ After config change or image update:
    python3 smoke_mcp.py --stdio
    ```
 
-   Expect **26 tools** and OK for `get_adapter_status`, `get_account_summary`,
+   Expect **29 tools** and OK for `get_adapter_status`, `get_account_summary`,
    `search_instruments`.
 
 4. Optional live read smoke (credentials required):
@@ -39,7 +39,7 @@ Warm session offline — not from agent login loops:
 python3 check_login.py
 ```
 
-## MCP tools (26)
+## MCP tools (29)
 
 | Tool | Auth | Notes |
 |------|------|--------|
@@ -51,6 +51,9 @@ python3 check_login.py
 | `get_etf_analysis` | yes | ETF composition |
 | `get_crypto_analysis` | yes | Crypto details |
 | `search_instruments` | no | Find ISINs |
+| `search_instruments_aggregations` | no | Faceted search counts |
+| `get_search_tags` | no | Available search tags |
+| `get_search_suggested_tags` | no | Tag suggestions for query |
 | `get_price_history` | no | Charts |
 | `get_stock_news` | no | News |
 | `get_portfolio_history` | yes | Depot history |

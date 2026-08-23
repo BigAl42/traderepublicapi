@@ -55,6 +55,17 @@ def _mock_client() -> MagicMock:
         "query": "Apple",
         "results": [{"isin": "US0378331005", "name": "Apple Inc."}],
     })
+    mock.search_instruments_aggregations = AsyncMock(return_value={
+        "query": "Apple",
+        "aggregations": [{"category": "stock", "count": 5}],
+    })
+    mock.get_search_tags = AsyncMock(return_value={
+        "tags": [{"id": "tech", "label": "Technology"}],
+    })
+    mock.get_search_suggested_tags = AsyncMock(return_value={
+        "query": "App",
+        "suggested_tags": [{"id": "apple", "label": "Apple"}],
+    })
     mock.get_price_history = AsyncMock(return_value={
         "ticker": "US0378331005",
         "range": "1y",
@@ -347,6 +358,27 @@ class McpToolsTest(unittest.IsolatedAsyncioTestCase):
             {"query": "Apple", "instrument_type": "stock", "jurisdiction": "DE"},
         )
         mock.search_instruments.assert_awaited_once()
+
+    async def test_search_instruments_aggregations(self):
+        mock = _mock_client()
+        mcp_server = _patch_client(mock)
+        await mcp_server.mcp.call_tool(
+            "search_instruments_aggregations",
+            {"query": "Apple", "instrument_type": "stock", "jurisdiction": "DE"},
+        )
+        mock.search_instruments_aggregations.assert_awaited_once()
+
+    async def test_get_search_tags(self):
+        mock = _mock_client()
+        mcp_server = _patch_client(mock)
+        await mcp_server.mcp.call_tool("get_search_tags", {})
+        mock.get_search_tags.assert_awaited_once()
+
+    async def test_get_search_suggested_tags(self):
+        mock = _mock_client()
+        mcp_server = _patch_client(mock)
+        await mcp_server.mcp.call_tool("get_search_suggested_tags", {"query": "App"})
+        mock.get_search_suggested_tags.assert_awaited_once_with("App")
 
     async def test_get_price_history(self):
         mock = _mock_client()

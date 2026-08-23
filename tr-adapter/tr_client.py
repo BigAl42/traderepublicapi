@@ -579,6 +579,52 @@ class TradeRepublicClient:
             "results": results,
         }
 
+    async def search_instruments_aggregations(
+        self,
+        query: str,
+        instrument_type: str = "stock",
+        jurisdiction: str | None = None,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> dict[str, Any]:
+        """Faceted search aggregations by category (no login required)."""
+        jurisdiction = self._default_jurisdiction(jurisdiction)
+        if instrument_type not in self.INSTRUMENT_TYPES:
+            raise TradeRepublicClientError(
+                f"instrument_type must be one of {self.INSTRUMENT_TYPES}",
+                retryable=False,
+                kind=ErrorKind.CONFIG,
+            )
+        aggregations = await self._query_public(
+            self._api.neon_search_aggregations(
+                query=query,
+                page=page,
+                page_size=page_size,
+                instrument_type=instrument_type,
+                jurisdiction=jurisdiction,
+            )
+        )
+        return {
+            "query": query,
+            "instrument_type": instrument_type,
+            "jurisdiction": jurisdiction,
+            "page": page,
+            "page_size": page_size,
+            "aggregations": aggregations,
+        }
+
+    async def get_search_tags(self) -> dict[str, Any]:
+        """Available neon search tags (no login required)."""
+        tags = await self._query_public(self._api.neon_search_tags())
+        return {"tags": tags}
+
+    async def get_search_suggested_tags(self, query: str = "") -> dict[str, Any]:
+        """Suggested search tags for a query string (no login required)."""
+        suggestions = await self._query_public(
+            self._api.neon_search_suggested_tags(query=query)
+        )
+        return {"query": query, "suggested_tags": suggestions}
+
     async def get_price_history(
         self,
         ticker: str,
