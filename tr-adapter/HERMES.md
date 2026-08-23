@@ -118,11 +118,109 @@ Only when `TR_MCP_WRITE_ENABLED=1` and user explicitly asked:
 5. `get_live_quote` / `get_order_preview` / `get_derivatives` for research & pre-trade
 6. `get_recent_transactions` or `get_full_timeline`; then `get_transaction_detail` for docs
 
+## Hermes MCP compatibility (research notes)
+
+What Hermes expects from an MCP server, and how it relates to the
+`missing required argument(s): ticker` failures seen via the gateway
+(but not via `smoke_mcp.py`).
+
+### What Hermes requires (server side)
+
+Hermes is a standard MCP **client**. There is no Hermes-specific server
+protocol — any compliant MCP server over stdio or HTTP works.
+
+| Requirement | Detail |
+|-------------|--------|
+| Transport | stdio (`command` + `args`) or HTTP (`url`) in `~/.hermes/config.yaml` → `mcp_servers` |
+| Discovery | `initialize` + `tools/list` at startup |
+| Tool naming | Hermes registers tools as `mcp_{server}_{tool}` (hyphens/dots → underscores) |
+| `inputSchema` | Valid JSON Schema object; Hermes sanitizes on registration (`schema_sanitizer.py`) |
+| Env isolation | stdio subprocesses get a filtered env; secrets only via explicit `env:` block |
+
+Docs: [Hermes MCP feature guide](https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp),
+[native MCP reference](https://github.com/NousResearch/hermes-agent/blob/main/skills/autonomous-ai-agents/hermes-agent/references/native-mcp.md).
+
+Our adapter already meets these: FastMCP stdio, flat object schemas, simple
+types (`string`, `boolean`, `integer`), `required` arrays set correctly.
+`smoke_mcp.py --stdio` proves the server side is fine.
+
+### Tool Search bridge (likely root cause of arg failures)
+
+When MCP tools are present, Hermes **Tool Search** (default `tools.tool_search.enabled: auto`)
+replaces direct MCP tool schemas with three bridge tools:
+
+```
+tool_search(query, limit?)
+tool_describe(name)
+tool_call(name, arguments)    ← nested arguments object
+```
+
+The model must call `tool_call("mcp_trade_republic_get_stock_news", {"ticker": "US0378331005"})`.
+Hermes unwraps the bridge and forwards flat args to `session.call_tool()`.
+
+**Known Hermes bugs that match our symptoms** (parameterless tools OK, required args “missing”):
+
+1. **Flattened bridge arguments** ([hermes-agent#76650](https://github.com/NousResearch/hermes-agent/pull/76650)):
+   Gemini/Copilot models emit `arguments.ticker` as a dotted sibling key instead of
+   `arguments: {ticker: ...}`. Hermes reads `args.get("arguments")` as `None`, validates
+   against `{}`, and returns `missing required argument(s): ticker` **before** our server
+   is called.
+
+2. **Blind `tool_call` without prior `tool_describe`** ([hermes-agent#59267](https://github.com/NousResearch/hermes-agent/pull/59267)):
+   Model invokes deferred tools without loading the schema first.
+
+3. **Truncated tool JSON** ([hermes-agent#35151](https://github.com/NousResearch/hermes-agent/issues/35151)):
+   Broken argument JSON can be replaced with `{}` (newer main fails closed instead).
+
+**Conclusion:** If `smoke_mcp.py` passes parameterized calls but Hermes gateway fails with
+“missing required argument(s)”, the break is in Hermes’ bridge/validation layer, not in
+this adapter’s schemas or FastMCP handlers.
+
+### Hermes-side mitigations
+
+1. **Upgrade Hermes** to a build that includes PR #76650 (flattened `arguments.*` recovery).
+2. **Agent prompt:** For deferred MCP tools, always `tool_describe(name)` before
+   `tool_call(name, arguments)` with a nested `arguments` object (not flat top-level keys).
+3. **Disable Tool Search** for small catalogs (forces eager/direct tool schemas):
+   ```yaml
+   tools:
+     tool_search:
+       enabled: off
+   ```
+4. **Check model/provider:** Flattening bugs are reported mainly with Gemini-family models
+   via Copilot; Claude/OpenAI nested objects usually work.
+
+### Adapter-side best practices (optional hardening)
+
+These do **not** fix the bridge flattening bug but reduce other friction:
+
+| Change | Why |
+|--------|-----|
+| Avoid `str \| None` / `anyOf` for optionals | Use `default=""` instead of nullable `confirm_token` / `after` — simpler for strict parsers |
+| Add `Field(description=...)` on every property | Helps Tool Search BM25 retrieval; our `ticker` fields currently only have `title` |
+| Accept `isin` alias alongside `ticker` | Models often say “ISIN” but schema says `ticker` |
+| Keep flat top-level params | No nested input objects; Hermes forwards flat dicts to MCP |
+| Short tool docstrings | Descriptions feed search/describe; keep first sentence ≤60 chars for tier-1 listing |
+
+Current schemas (verified via `mcp.list_tools()`): all parameterized tools use flat
+`properties` + `required`; only `confirm_token` and `after` use `anyOf` nullable unions.
+
+### Diagnosis checklist
+
+| Test | Pass | Fail → |
+|------|------|--------|
+| `python3 smoke_mcp.py --stdio` | Server OK | Fix adapter / deploy |
+| `python3 smoke_mcp.py --live` with args | TR + args OK | Session / TR API |
+| Hermes: `get_adapter_status` (no args) | Bridge + MCP OK | Config / watchdog / slug |
+| Hermes: `get_stock_news(ticker=…)` | End-to-end OK | Tool Search / model / Hermes version |
+| Hermes logs: `session.call_tool` reached? | Adapter issue | Hermes bridge dropped args earlier |
+
 ## Troubleshooting
 
 | Symptom | Likely cause | Action |
 |---------|----------------|--------|
 | Only 2 tools in agent | Stale gateway catalog / allowlist | Restart watchdog; run `smoke_mcp.py --stdio` |
+| `missing required argument(s): ticker` via Hermes, smoke OK | Tool Search bridge / flattened args | Upgrade Hermes; try `tool_search.enabled: off`; see section above |
 | `login_required` | Cold session | `check_login.py` offline; set `TR_TOKEN` |
 | `writes_disabled` | Expected in prod | Set `TR_MCP_WRITE_ENABLED=1` only if needed |
 | JSON error with `guidance` | Structured adapter error | Follow `guidance`; respect `retry_after_seconds` |
