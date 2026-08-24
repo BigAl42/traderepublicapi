@@ -44,11 +44,19 @@ def _confirm_ttl_seconds() -> int:
 
 
 def _confirm_store_path() -> Path:
-    override = os.getenv("TR_MCP_CONFIRM_STORE")
+    """Absolute confirmation-store path (survives Hermes cwd / respawn changes).
+
+    Prefer ``TR_MCP_CONFIRM_STORE``; otherwise place next to the resolved cookies file.
+    Relative paths are anchored to ``TR_ADAPTER_DATA_DIR`` or the adapter package dir
+    (see ``session.resolve_runtime_path``).
+    """
+    from session import resolve_runtime_path
+
+    override = os.getenv("TR_MCP_CONFIRM_STORE", "").strip()
     if override:
-        return Path(override)
-    cookies = os.getenv("TR_COOKIES_FILE", "tr_cookies.txt")
-    return Path(cookies).with_name(Path(cookies).name + ".confirmations.json")
+        return resolve_runtime_path(override)
+    cookies = resolve_runtime_path(os.getenv("TR_COOKIES_FILE", "tr_cookies.txt"))
+    return cookies.with_name(cookies.name + ".confirmations.json")
 
 
 class ConfirmationStore:

@@ -39,6 +39,7 @@ from session import (  # noqa: E402
     SessionBlockedError,
     circuit_state_path_for_cookies,
     classify_auth_error,
+    resolve_runtime_path,
 )
 
 LOGGER = logging.getLogger("tr_adapter.client")
@@ -89,7 +90,11 @@ class TradeRepublicClient:
         phone = os.getenv("TR_PHONE", "")
         pin = os.getenv("TR_PIN", "")
         locale = os.getenv("TR_LOCALE", "de")
-        cookies_file = os.getenv("TR_COOKIES_FILE", "tr_cookies.txt")
+        # Absolute path so cookies / circuit / confirmations stay stable when Hermes
+        # respawns the MCP process with a different working directory.
+        cookies_file = str(
+            resolve_runtime_path(os.getenv("TR_COOKIES_FILE", "tr_cookies.txt"))
+        )
         self._timeout = float(os.getenv("TR_TIMEOUT", "20"))
         self._has_credentials = bool(self._token or (phone and pin))
         self._allow_interactive_login = os.getenv(

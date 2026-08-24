@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 import time
@@ -17,8 +18,75 @@ from session import (  # noqa: E402
     ClassifiedError,
     ErrorKind,
     SessionBlockedError,
+    adapter_dir,
+    circuit_state_path_for_cookies,
     classify_auth_error,
+    resolve_runtime_path,
 )
+
+
+class ResolveRuntimePathTest(unittest.TestCase):
+    def test_absolute_paths_unchanged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            absolute = Path(tmp) / "cookies.txt"
+            self.assertEqual(resolve_runtime_path(absolute), absolute.resolve())
+
+    def test_relative_paths_anchor_to_adapter_dir_by_default(self):
+        import os
+        from unittest.mock import patch
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("TR_ADAPTER_DATA_DIR", None)
+            resolved = resolve_runtime_path("tr_cookies.txt")
+            self.assertTrue(resolved.is_absolute())
+            self.assertEqual(resolved.parent, adapter_dir())
+            self.assertEqual(resolved.name, "tr_cookies.txt")
+
+    def test_data_dir_override(self):
+        import os
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TR_ADAPTER_DATA_DIR": tmp}):
+                resolved = resolve_runtime_path("tr_cookies.txt")
+                self.assertEqual(resolved, Path(tmp).resolve() / "tr_cookies.txt")
+
+    def test_circuit_path_next_to_resolved_cookies(self):
+        import os
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TR_ADAPTER_DATA_DIR": tmp}):
+                circuit = circuit_state_path_for_cookies("tr_cookies.txt")
+                self.assertEqual(
+                    circuit,
+                    Path(tmp).resolve() / "tr_cookies.txt.auth_circuit.json",
+                )
+
+    def test_circuit_lock_lives_next_to_absolute_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            # Change cwd so a relative state path would diverge without resolve_runtime_path.
+            original = Path.cwd()
+            other = Path(tmp) / "other_cwd"
+            other.mkdir()
+            state = Path(tmp) / "circuit.json"
+            try:
+                os.chdir(other)
+                breaker = AuthCircuitBreaker(state, failure_threshold=1, cooldown_seconds=30)
+                self.assertTrue(breaker.state_path.is_absolute())
+                self.assertEqual(breaker.state_path, state.resolve())
+                lock_path = Path(str(breaker.state_path) + ".lock")
+                breaker.record_failure(
+                    ClassifiedError(
+                        kind=ErrorKind.AUTH_FAILED,
+                        message="fail",
+                        retryable=True,
+                    )
+                )
+                self.assertTrue(lock_path.is_file())
+                self.assertEqual(lock_path.parent, state.parent)
+            finally:
+                os.chdir(original)
 
 
 class ClassifyAuthErrorTest(unittest.TestCase):
