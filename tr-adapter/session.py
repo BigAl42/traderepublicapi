@@ -150,6 +150,37 @@ def classify_auth_error(exc: Exception) -> ClassifiedError:
     )
 
 
+def adapter_dir() -> Path:
+    """Directory containing the tr-adapter package (stable across Hermes cwd changes)."""
+    return Path(__file__).resolve().parent
+
+
+def data_dir() -> Path:
+    """Root for relative cookie / sidecar paths.
+
+    Override with ``TR_ADAPTER_DATA_DIR`` (absolute or ~). Default: adapter package dir
+    so Hermes process respawns with a different cwd still share the same files.
+    """
+    override = os.getenv("TR_ADAPTER_DATA_DIR", "").strip()
+    if override:
+        return Path(override).expanduser().resolve()
+    return adapter_dir()
+
+
+def resolve_runtime_path(path: str | Path) -> Path:
+    """Resolve a runtime file path; relative paths anchor to ``data_dir()``."""
+    candidate = Path(path).expanduser()
+    if candidate.is_absolute():
+        return candidate.resolve()
+    return (data_dir() / candidate).resolve()
+
+
+def circuit_state_path_for_cookies(cookies_file: str | Path) -> Path:
+    """Auth-circuit JSON next to the cookies file (both resolved to absolute paths)."""
+    path = resolve_runtime_path(cookies_file)
+    return path.with_name(path.name + ".auth_circuit.json")
+
+
 class AuthCircuitBreaker:
     """File-backed circuit breaker shared across MCP process restarts."""
 
@@ -160,7 +191,8 @@ class AuthCircuitBreaker:
         failure_threshold: int | None = None,
         cooldown_seconds: int | None = None,
     ):
-        self.state_path = Path(state_path)
+        # Always absolute so fcntl lock + state survive cwd changes across respawns.
+        self.state_path = resolve_runtime_path(state_path)
         self.failure_threshold = failure_threshold or _env_int("TR_AUTH_MAX_FAILURES", 3)
         self.cooldown_seconds = cooldown_seconds or _env_int("TR_AUTH_COOLDOWN_SECONDS", 900)
         self._lock = threading.Lock()
@@ -280,8 +312,3 @@ class SessionBlockedError(Exception):
         self.kind = kind
         self.retry_after_seconds = retry_after_seconds
         self.retryable = False
-
-
-def circuit_state_path_for_cookies(cookies_file: str | Path) -> Path:
-    path = Path(cookies_file)
-    return path.with_name(path.name + ".auth_circuit.json")

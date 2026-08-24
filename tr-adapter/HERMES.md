@@ -31,6 +31,8 @@ After config change or image update:
 TR_MCP_ALLOW_INTERACTIVE_LOGIN=0
 TR_MCP_WRITE_ENABLED=0
 TR_TOKEN=...                      # or warm TR_COOKIES_FILE via check_login.py
+# Optional: pin cookie/circuit/confirm files when Hermes cwd varies
+# TR_ADAPTER_DATA_DIR=/opt/data/home/traderepublicapi/tr-adapter
 ```
 
 Warm session offline — not from agent login loops:

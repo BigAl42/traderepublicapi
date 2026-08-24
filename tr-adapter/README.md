@@ -10,6 +10,8 @@ TR_MCP_ALLOW_INTERACTIVE_LOGIN=0
 TR_MCP_WRITE_ENABLED=0
 # Provide TR_TOKEN and/or a warm cookie file:
 # TR_COOKIES_FILE=tr_cookies.txt
+# Optional stable root when Hermes changes cwd between respawns:
+# TR_ADAPTER_DATA_DIR=/opt/data/home/traderepublicapi/tr-adapter
 ```
 
 Warm the session **offline** (not from Hermes tool loops):
@@ -22,7 +24,7 @@ python3 check_login.py
 After deploy, verify MCP plumbing (no account):
 
 ```bash
-python3 smoke_mcp.py --stdio
+python3 smoke_mcp.py
 ```
 
 Hermes agent rules and deploy checklist: [HERMES.md](HERMES.md).
