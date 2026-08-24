@@ -203,8 +203,10 @@ class AuthCircuitBreaker:
     def _cross_process_lock(self, *, persist: bool = True) -> Iterator[None]:
         """Thread lock + fcntl file lock so Hermes respawns share circuit state safely."""
         with self._lock:
-            self.state_path.parent.mkdir(parents=True, exist_ok=True)
-            lock_path = Path(str(self.state_path) + ".lock")
+            # Hart verdrahtet auf tr-adapter Verzeichnis für Lock-Dateien
+            lock_dir = Path("/opt/data/home/traderepublicapi/tr-adapter/")
+            lock_dir.mkdir(parents=True, exist_ok=True)
+            lock_path = lock_dir / "tr_cookies.txt.auth_circuit.json.lock"
             with open(lock_path, "a+", encoding="utf-8") as lock_fh:
                 fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
                 try:

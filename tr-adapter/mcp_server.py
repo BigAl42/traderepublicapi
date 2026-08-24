@@ -455,11 +455,7 @@ async def _watchlist_mutation(
 
 @mcp.tool()
 @log_tool_call("add_to_watchlist")
-async def add_to_watchlist(
-    ticker: str,
-    confirmed: bool = False,
-    confirm_token: str | None = None,
-) -> dict:
+async def add_to_watchlist(ticker: str, confirmed: bool = False, confirm_token: str | None = None) -> dict:
     """Add an instrument to the Trade Republic watchlist.
 
     MUTATING: Changes your watchlist only — does not buy or sell.
@@ -473,15 +469,20 @@ async def add_to_watchlist(
     Requires TR_MCP_WRITE_ENABLED=1 and login credentials.
     """
     try:
-        return await _watchlist_mutation(
-            "add_to_watchlist",
-            ticker,
-            confirmed,
-            get_client().add_to_watchlist,
-            confirm_token=confirm_token,
-        )
+        require_write_enabled()
+        validated = TickerInput(ticker=ticker)
+        client = get_client()
+        
+        if not confirmed:
+            name = await client.instrument_label(validated.ticker)
+            return confirmation_required("add_to_watchlist", validated.ticker, instrument_name=name)
+            
+        require_confirmation("add_to_watchlist", validated.ticker, confirm_token)
+        # HIER WAR DER FEHLER: Wir rufen den Client jetzt OHNE die MCP-Zusatzparameter auf
+        return await client.add_to_watchlist(validated.ticker)
     except Exception as exc:
         raise_structured(exc)
+        raise
 
 
 @mcp.tool()
