@@ -223,6 +223,8 @@ Current schemas (verified via `mcp.list_tools()`): all parameterized tools use f
 |---------|----------------|--------|
 | Only 2 tools in agent | Stale gateway catalog / allowlist | Restart watchdog; run `smoke_mcp.py --stdio` |
 | `missing required argument(s): ticker` via Hermes, smoke OK | Tool Search bridge / flattened args | Upgrade Hermes; try `tool_search.enabled: off`; see section above |
+| `This event loop is already running` in `mcp-stderr.log` | Sync `TrBlockingApi` / `run_until_complete` inside FastMCP loop | Deploy current adapter (`TRApi` async only). Never point Hermes at scripts that use `TrBlockingApi`. |
+| Tools missing after runtime errors | Hermes drops/fails MCP server after tool errors | Fix loop bug, restart watchdog, re-run `python3 smoke_mcp.py` |
 | `login_required` | Cold session | `check_login.py` offline; set `TR_TOKEN` |
 | `writes_disabled` | Expected in prod | Set `TR_MCP_WRITE_ENABLED=1` only if needed |
 | JSON error with `guidance` | Structured adapter error | Follow `guidance`; respect `retry_after_seconds` |
