@@ -15,10 +15,10 @@ TR_MCP_AUTO_RENEW=1   # default: soft cookie/token renew on 401 / near-expiry
 # TR_ADAPTER_DATA_DIR=/opt/data/home/traderepublicapi/tr-adapter
 ```
 
-On cold/401 sessions the adapter renews itself (disk cookies → `TR_TOKEN` resume →
-optional push login only if `TR_MCP_ALLOW_INTERACTIVE_LOGIN=1`). Agents must **not**
-switch to other market-data providers for account/portfolio tools; if renew fails,
-warm offline:
+On cold/401 sessions the adapter soft-renews itself (disk cookies → `TR_TOKEN`).
+If cookies are fully dead, call MCP tool `renew_session` (app push with
+`TR_PHONE`/`TR_PIN`) — agents must **not** switch to other market-data providers.
+Offline alternative:
 
 ```bash
 python3 check_login.py

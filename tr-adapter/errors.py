@@ -48,17 +48,17 @@ def error_payload(exc: BaseException) -> dict[str, Any]:
             )
         elif kind_value == ErrorKind.LOGIN_REQUIRED.value:
             guidance = (
-                "Trade Republic session is cold. The MCP adapter already attempted "
-                "automatic cookie/token renew (TR_MCP_AUTO_RENEW). Do NOT switch to "
-                "ClawStreet or other providers for account/portfolio tools. "
-                "Warm cookies offline with check_login.py or set a fresh TR_TOKEN, "
-                "then call get_adapter_status and retry the same tool once."
+                "Trade Republic session is cold. Soft auto-renew already ran. "
+                "Call renew_session next — if status is awaiting_push_confirm, ask the "
+                "user to confirm the Trade Republic app push, then call renew_session "
+                "again. Do NOT switch to ClawStreet or invent browser cookie scraping. "
+                "Retry the same account tool once session is ready."
             )
         elif kind_value == ErrorKind.SESSION_EXPIRED.value:
             guidance = (
-                "Session expired mid-call. Retry the same MCP tool once — the adapter "
-                "auto-renews from cookies/TR_TOKEN. Do not change data providers. "
-                "If it fails again, run check_login.py offline."
+                "Session expired mid-call. Retry the same MCP tool once (soft auto-renew). "
+                "If it fails, call renew_session (app push confirm if asked). "
+                "Do not change data providers."
             )
         elif exc.retryable:
             guidance = (

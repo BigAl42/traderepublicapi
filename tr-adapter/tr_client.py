@@ -108,6 +108,12 @@ class TradeRepublicClient:
         )
         self._last_renew_at: float | None = None
         self._last_renew_result: str | None = None
+        self._last_renew_http_status: int | None = None
+        self._login_process_id: str | None = None
+        # Dedicated renew_session tool may start push login even when auto interactive is off.
+        self._renew_allow_push = os.getenv(
+            "TR_MCP_RENEW_ALLOW_PUSH", "1"
+        ).strip().lower() in ("1", "true", "yes")
 
         self._api = TRApi(
             phone or "+0000000000",
@@ -331,8 +337,8 @@ class TradeRepublicClient:
             if not allow_login:
                 raise TradeRepublicClientError(
                     "No warm Trade Republic session available for this action. "
-                    "The adapter already tried cookie/token renew. Warm cookies offline "
-                    "with check_login.py (do not switch to other data providers).",
+                    "Call renew_session (confirm the Trade Republic app push if asked). "
+                    "Do not switch to other data providers.",
                     retryable=True,
                     kind=ErrorKind.LOGIN_REQUIRED,
                 )
@@ -349,7 +355,9 @@ class TradeRepublicClient:
             # Reload disk cookies first — may be fresher than in-memory jar.
             self._api.load_cookies_from_disk()
             response = self._api._refresh_web_session()
-            if getattr(response, "status_code", 500) >= 400:
+            status = int(getattr(response, "status_code", 500) or 500)
+            self._last_renew_http_status = status
+            if status >= 400:
                 return False
             data = self._api.refresh_account_settings()
             if data is None:
@@ -365,6 +373,203 @@ class TradeRepublicClient:
         except Exception as exc:  # noqa: BLE001
             LOGGER.info("Soft session refresh failed: %s", redact_secrets(str(exc)))
             return False
+
+    async def renew_session(
+        self,
+        *,
+        authenticator_code: str | None = None,
+        allow_push: bool | None = None,
+    ) -> dict[str, Any]:
+        """Warm session for Hermes: soft renew → resume → optional push login poll.
+
+        Soft cookie/token renew first. If that fails and phone/PIN are configured,
+        starts (or continues) a web login process. When status is
+        ``awaiting_push_confirm``, the human must confirm in the Trade Republic
+        app; call this tool again afterward (no browser cookie scraping).
+        """
+        allow_push = self._renew_allow_push if allow_push is None else bool(allow_push)
+        phone = bool(os.getenv("TR_PHONE", "").strip())
+        pin = bool(os.getenv("TR_PIN", "").strip())
+
+        try:
+            self._circuit.guard()
+        except SessionBlockedError as exc:
+            raise self._map_error(exc) from exc
+
+        # Continue an in-flight push/authenticator login first.
+        if self._api._process_id or self._login_process_id:
+            return await self._continue_push_login(authenticator_code=authenticator_code)
+
+        if await self._soft_refresh_session():
+            return {
+                "status": "ready",
+                "method": "soft_refresh",
+                "session_ready": True,
+                "http_status": self._last_renew_http_status,
+                "guidance": "Session warmed via soft refresh. Retry the original account tool.",
+            }
+
+        if await self._try_resume():
+            return {
+                "status": "ready",
+                "method": "resumed",
+                "session_ready": True,
+                "http_status": self._last_renew_http_status,
+                "guidance": "Session resumed from cookies/TR_TOKEN. Retry the original account tool.",
+            }
+
+        if not allow_push:
+            self._last_renew_result = "push_disabled"
+            self._last_renew_at = time.time()
+            return {
+                "status": "failed",
+                "method": None,
+                "session_ready": False,
+                "code": "login_required",
+                "http_status": self._last_renew_http_status,
+                "guidance": (
+                    "Soft renew failed and push login is disabled "
+                    "(TR_MCP_RENEW_ALLOW_PUSH=0). Warm cookies offline with "
+                    "check_login.py or set a fresh TR_TOKEN. Do NOT switch providers."
+                ),
+            }
+
+        if not (phone and pin):
+            self._last_renew_result = "missing_phone_pin"
+            self._last_renew_at = time.time()
+            return {
+                "status": "failed",
+                "method": None,
+                "session_ready": False,
+                "code": "login_required",
+                "http_status": self._last_renew_http_status,
+                "guidance": (
+                    "Cookies/TR_TOKEN are cold (HTTP "
+                    f"{self._last_renew_http_status or '401'}). Set TR_PHONE and "
+                    "TR_PIN so renew_session can send an app push, or place a fresh "
+                    "TR_TOKEN. Do NOT switch to other market-data providers."
+                ),
+            }
+
+        try:
+            started = await asyncio.to_thread(self._api.start_web_login)
+        except (TRapiException, SessionBlockedError) as exc:
+            self._last_renew_result = "push_start_failed"
+            self._last_renew_at = time.time()
+            raise self._map_error(exc) from exc
+
+        self._login_process_id = started.get("process_id")
+        self._last_renew_result = "awaiting_push_confirm"
+        self._last_renew_at = time.time()
+        return self._push_login_status_payload(started)
+
+    async def _continue_push_login(
+        self, *, authenticator_code: str | None = None
+    ) -> dict[str, Any]:
+        if self._login_process_id and not self._api._process_id:
+            self._api._process_id = self._login_process_id
+
+        try:
+            if authenticator_code:
+                polled = await asyncio.to_thread(
+                    self._api.complete_web_login_authenticator, authenticator_code
+                )
+            else:
+                polled = await asyncio.to_thread(self._api.poll_web_login)
+        except (TRapiException, SessionBlockedError) as exc:
+            self._last_renew_result = "push_poll_failed"
+            self._last_renew_at = time.time()
+            raise self._map_error(exc) from exc
+
+        status = (polled.get("status") or "").upper()
+        required = polled.get("required_action")
+
+        if required == "AUTHENTICATOR_VERIFICATION" and not authenticator_code:
+            self._last_renew_result = "awaiting_authenticator"
+            self._last_renew_at = time.time()
+            return {
+                "status": "awaiting_authenticator",
+                "method": "push_login",
+                "session_ready": False,
+                "process_id": polled.get("process_id"),
+                "login_status": status,
+                "required_action": required,
+                "guidance": (
+                    "Trade Republic requires an authenticator code. Ask the user for "
+                    "the code, then call renew_session again with authenticator_code. "
+                    "Do not switch data providers."
+                ),
+            }
+
+        if status in {"CONFIRMED", "COMPLETED"}:
+            ok = await asyncio.to_thread(self._api.finalize_web_login)
+            if not ok:
+                self._last_renew_result = "finalize_failed"
+                self._last_renew_at = time.time()
+                self._login_process_id = None
+                return {
+                    "status": "failed",
+                    "method": "push_login",
+                    "session_ready": False,
+                    "code": "login_required",
+                    "guidance": (
+                        "Push was confirmed but cookies were not established. "
+                        "Call renew_session once more or run check_login.py offline."
+                    ),
+                }
+            self._persist_cookies()
+            self._session_ready = True
+            self._circuit.record_success()
+            self._login_process_id = None
+            self._last_renew_result = "push_login"
+            self._last_renew_at = time.time()
+            await self._reset_transport()
+            return {
+                "status": "ready",
+                "method": "push_login",
+                "session_ready": True,
+                "guidance": (
+                    "Session warmed after app confirmation. Retry the original "
+                    "account/portfolio tool once — do not switch providers."
+                ),
+            }
+
+        if status in {None, "", "PENDING"}:
+            self._last_renew_result = "awaiting_push_confirm"
+            self._last_renew_at = time.time()
+            return self._push_login_status_payload(polled)
+
+        self._last_renew_result = f"push_status_{status.lower()}"
+        self._last_renew_at = time.time()
+        self._login_process_id = None
+        self._api._process_id = None
+        return {
+            "status": "failed",
+            "method": "push_login",
+            "session_ready": False,
+            "code": "login_required",
+            "login_status": status,
+            "guidance": (
+                f"Login process ended with status {status!r}. Call renew_session to "
+                "start again after the user is ready, or warm cookies offline."
+            ),
+        }
+
+    def _push_login_status_payload(self, started: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "status": "awaiting_push_confirm",
+            "method": "push_login",
+            "session_ready": False,
+            "process_id": started.get("process_id") or self._login_process_id,
+            "login_status": started.get("status"),
+            "required_action": started.get("required_action"),
+            "expires_at": started.get("expires_at"),
+            "guidance": (
+                "Open the Trade Republic app and confirm the login push, then call "
+                "renew_session again (same tool). Do NOT invent browser cookie flows "
+                "and do NOT switch to ClawStreet or other providers for account data."
+            ),
+        }
 
     async def _ensure_session_for_write(self) -> None:
         """Warm session for mutating calls — resume + soft refresh, no login storm."""
@@ -421,14 +626,15 @@ class TradeRepublicClient:
         elif cookies_path.is_file() or bool(self._token):
             guidance = (
                 "Credentials/cookies present but session not warm in this process yet. "
-                "Next authenticated tool call will auto-renew (TR_MCP_AUTO_RENEW). "
-                "If renew fails, run check_login.py offline — do not switch data providers."
+                "Authenticated tools auto soft-renew; if that fails call renew_session "
+                "(confirm app push when status is awaiting_push_confirm). "
+                "Do not switch data providers."
             )
             overall = "cold"
         else:
             guidance = (
-                "No warm session material. Set TR_TOKEN or run check_login.py with "
-                "TR_PHONE/TR_PIN, keep interactive login off in production."
+                "No warm session material. Call renew_session with TR_PHONE/TR_PIN "
+                "configured, or set TR_TOKEN. Keep automatic interactive login off."
             )
             overall = "unconfigured"
 
@@ -441,8 +647,11 @@ class TradeRepublicClient:
             "cookies_file_exists": cookies_path.is_file(),
             "allow_interactive_login": self._allow_interactive_login,
             "auto_renew": self._auto_renew,
+            "renew_allow_push": self._renew_allow_push,
             "last_renew_at": self._last_renew_at,
             "last_renew_result": self._last_renew_result,
+            "last_renew_http_status": self._last_renew_http_status,
+            "login_process_id": self._login_process_id or getattr(self._api, "_process_id", None),
             "session_expires_at": getattr(self._api, "_session_expires_at", None) or None,
             "write_enabled": write_enabled(),
             "auth_circuit_open": cooldown > 0,
@@ -565,9 +774,12 @@ class TradeRepublicClient:
                 # Strong guidance: agent must not switch providers.
                 raise TradeRepublicClientError(
                     (
-                        "Trade Republic session is cold and automatic renew failed. "
-                        "Warm the session offline with check_login.py or set a fresh TR_TOKEN. "
-                        "Do NOT fall back to other market-data providers for account/portfolio tools."
+                        "Trade Republic session is cold and automatic soft renew failed "
+                        f"(HTTP {self._last_renew_http_status or '401'}). "
+                        "Call renew_session now. If it returns awaiting_push_confirm, "
+                        "ask the user to confirm the Trade Republic app push, then call "
+                        "renew_session again. Do NOT fall back to other market-data "
+                        "providers for account/portfolio tools."
                     ),
                     retryable=True,
                     kind=ErrorKind.LOGIN_REQUIRED,
