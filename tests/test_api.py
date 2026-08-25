@@ -73,6 +73,16 @@ class SurfaceTest(unittest.TestCase):
         for name in names:
             self.assertTrue(callable(getattr(TrBlockingApi, name)), name)
 
+    def test_blocking_api_rejects_nested_event_loop(self):
+        blocking = TrBlockingApi("+49000000000", "0000")
+
+        async def _call_from_running_loop():
+            with self.assertRaises(RuntimeError) as ctx:
+                blocking.cash()
+            self.assertIn("active asyncio event loop", str(ctx.exception))
+
+        asyncio.run(_call_from_running_loop())
+
     def test_public_exports(self):
         import trapi
 

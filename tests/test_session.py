@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 import tempfile
@@ -181,7 +182,7 @@ class WriteSessionPolicyTest(unittest.TestCase):
 
                         client = TradeRepublicClient(token="tok")
                         with self.assertRaises(TradeRepublicClientError) as ctx:
-                            client._ensure_session_for_write()
+                            asyncio.run(client._ensure_session_for_write())
                         self.assertEqual(ctx.exception.kind, ErrorKind.LOGIN_REQUIRED)
                         api.login.assert_not_called()
 
@@ -214,7 +215,7 @@ class WriteSessionPolicyTest(unittest.TestCase):
                         client = tr_client.TradeRepublicClient()
                         self.assertFalse(client._allow_interactive_login)
                         with self.assertRaises(tr_client.TradeRepublicClientError) as ctx:
-                            client._ensure_session(allow_login=True)
+                            asyncio.run(client._ensure_session(allow_login=True))
                         self.assertEqual(ctx.exception.kind, ErrorKind.LOGIN_REQUIRED)
                         api.login.assert_not_called()
 

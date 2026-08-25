@@ -209,7 +209,7 @@ class TradeRepublicClientTest(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True):
             client = TradeRepublicClient()
             with self.assertRaises(TradeRepublicClientError) as ctx:
-                client._ensure_session()
+                asyncio.run(client._ensure_session())
         self.assertIn("Missing credentials", str(ctx.exception))
 
     def test_normalize_position(self):

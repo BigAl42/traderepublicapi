@@ -163,10 +163,15 @@ class TradeRepublicClient:
     def _invalidate_session(self) -> None:
         self._session_ready = False
         # Drop sticky websocket so the next query reconnects with fresh cookies.
+        # Sync path only — never schedules tasks on FastMCP's running loop.
         try:
             self._api.reset_transport_sync()
         except Exception as exc:  # noqa: BLE001
             LOGGER.debug("Transport reset during invalidate failed: %s", exc)
+
+    async def _invalidate_session_async(self) -> None:
+        self._session_ready = False
+        await self._reset_transport()
 
     async def _reset_transport(self) -> None:
         try:
@@ -195,7 +200,7 @@ class TradeRepublicClient:
             self._invalidate_session()
         return TradeRepublicClientError.from_classified(classified)
 
-    def _try_resume(self) -> bool:
+    async def _try_resume(self) -> bool:
         """Cookie/token resume only — never starts a push login."""
         if self._token:
             self._inject_token_on_api()
@@ -204,7 +209,7 @@ class TradeRepublicClient:
             self._session_ready = True
             self._circuit.record_success()
             # New HTTP session cookies must not reuse a stale websocket.
-            self._api.reset_transport_sync()
+            await self._reset_transport()
             LOGGER.info("Resumed Trade Republic session from cookies/token")
             return True
         return False
@@ -230,7 +235,7 @@ class TradeRepublicClient:
         self._session_ready = True
         self._circuit.record_success()
 
-    def _ensure_session(self, *, allow_login: bool = True) -> None:
+    async def _ensure_session(self, *, allow_login: bool = True) -> None:
         """Ensure a usable web session.
 
         Cookie-first. Interactive login only when allow_login=True and circuit is closed.
@@ -247,7 +252,7 @@ class TradeRepublicClient:
         self._circuit.guard()
 
         try:
-            if self._try_resume():
+            if await self._try_resume():
                 return
             if not allow_login:
                 raise TradeRepublicClientError(
@@ -258,12 +263,13 @@ class TradeRepublicClient:
                     kind=ErrorKind.LOGIN_REQUIRED,
                 )
             self._interactive_login()
+            await self._reset_transport()
         except SessionBlockedError as exc:
             raise self._map_error(exc) from exc
         except TRapiException as exc:
             raise self._map_error(exc) from exc
 
-    def _soft_refresh_session(self) -> bool:
+    async def _soft_refresh_session(self) -> bool:
         """Refresh web session endpoint without triggering login."""
         try:
             response = self._api._refresh_web_session()
@@ -275,23 +281,23 @@ class TradeRepublicClient:
             self._persist_cookies()
             self._session_ready = True
             # Force websocket reconnect with refreshed cookies.
-            self._api.reset_transport_sync()
+            await self._reset_transport()
             return True
         except Exception as exc:  # noqa: BLE001
             LOGGER.info("Soft session refresh failed: %s", exc)
             return False
 
-    def _ensure_session_for_write(self) -> None:
+    async def _ensure_session_for_write(self) -> None:
         """Warm session for mutating calls — resume + soft refresh, no login storm."""
         self._circuit.guard()
         if self._session_ready:
-            if self._soft_refresh_session():
+            if await self._soft_refresh_session():
                 return
-            self._invalidate_session()
+            await self._invalidate_session_async()
 
-        self._ensure_session(allow_login=False)
-        if not self._soft_refresh_session():
-            self._invalidate_session()
+        await self._ensure_session(allow_login=False)
+        if not await self._soft_refresh_session():
+            await self._invalidate_session_async()
             raise TradeRepublicClientError(
                 "Session is not warm enough for mutating Trade Republic actions. "
                 "Wait out any auth cooldown, refresh TR_TOKEN/cookies with check_login.py, "
@@ -427,9 +433,9 @@ class TradeRepublicClient:
     async def _query_auth(self, coro: Any, *, mutating: bool = False) -> Any:
         """Authenticated WebSocket query."""
         if mutating:
-            self._ensure_session_for_write()
+            await self._ensure_session_for_write()
         else:
-            self._ensure_session(allow_login=True)
+            await self._ensure_session(allow_login=True)
             await self._throttle_read()
         try:
             result = await self._query(coro)
@@ -443,9 +449,9 @@ class TradeRepublicClient:
                 and mapped.kind in {ErrorKind.SESSION_EXPIRED, ErrorKind.SERVER}
                 and not self._circuit.is_open()
             ):
-                self._invalidate_session()
+                await self._invalidate_session_async()
                 try:
-                    if self._try_resume():
+                    if await self._try_resume():
                         return await self._query(coro)
                 except (TRapiException, TRapiExcServerErrorState) as retry_exc:
                     raise self._map_error(retry_exc) from retry_exc

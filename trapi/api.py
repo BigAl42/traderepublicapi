@@ -236,24 +236,17 @@ class TRApi:
                 pass
 
     def reset_transport_sync(self):
-        """Best-effort sync reset when no event loop is available."""
+        """Best-effort sync reset when no awaitable context is available.
+
+        Must not call ``run_until_complete`` / ``asyncio.run`` and must not
+        ``create_task`` on a foreign/running loop — that races reconnects and
+        surfaces as ``RuntimeError: This event loop is already running`` under
+        FastMCP. Async callers must use ``await reset_transport()`` instead.
+        """
         self.started = False
         self.callbacks = {}
         self.latest_response = {}
-        ws = self.ws
         self.ws = None
-        if ws is not None:
-            try:
-                close = getattr(ws, "close", None)
-                if close is not None:
-                    # websockets close is async; schedule if loop running, else ignore.
-                    try:
-                        loop = asyncio.get_running_loop()
-                        loop.create_task(ws.close())
-                    except RuntimeError:
-                        pass
-            except Exception:
-                pass
 
     def register_new_device(self, processId=None):
         self.signing_key = SigningKey.generate(curve=NIST256p, hashfunc=hashlib.sha512)
@@ -1349,6 +1342,16 @@ class TrBlockingApi(TRApi):
         super().__init__(number, pin, locale, key_file=key_file, auth=auth, cookies_file=cookies_file)
 
     def _run(self, coro):
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is not None and loop.is_running():
+            raise RuntimeError(
+                "TrBlockingApi cannot run inside an active asyncio event loop "
+                "(e.g. FastMCP / Hermes). Use async TRApi with await, not "
+                "TrBlockingApi sync wrappers."
+            )
         return asyncio.get_event_loop().run_until_complete(self.get_one(coro))
 
     async def get_one(self, f):
@@ -1366,87 +1369,74 @@ class TrBlockingApi(TRApi):
     # -----------------------------------------------------------
 
     def aggregate_history_light(self, isin, range="max", resolution=604800000, exchange="LSX"):
-        return asyncio.get_event_loop().run_until_complete(
-            self.get_one(super().aggregate_history_light(isin, range=range, resolution=resolution, exchange=exchange))
+        return self._run(
+            super().aggregate_history_light(
+                isin, range=range, resolution=resolution, exchange=exchange
+            )
         )
 
     def available_cash(self):
-        return asyncio.get_event_loop().run_until_complete(
-            self.get_one(super().available_cash())
-        )
+        return self._run(super().available_cash())
 
     def available_cash_for_payout(self):
-        return asyncio.get_event_loop().run_until_complete(
-            self.get_one(super().available_cash_for_payout())
-        )
+        return self._run(super().available_cash_for_payout())
 
     def cash(self):
-        return asyncio.get_event_loop().run_until_complete(self.get_one(super().cash()))
+        return self._run(super().cash())
 
     def instrument(self, id):
-        return asyncio.get_event_loop().run_until_complete(
-            self.get_one(super().instrument(id))
-        )
+        return self._run(super().instrument(id))
 
-    def neon_search(self, query="", page=1, page_size=20, instrument_type="stock", jurisdiction="DE", ):
-        return asyncio.get_event_loop().run_until_complete(
-            self.get_one(
-                super().neon_search(query=query, page=page, page_size=page_size, instrument_type=instrument_type,
-                                    jurisdiction=jurisdiction))
+    def neon_search(
+        self,
+        query="",
+        page=1,
+        page_size=20,
+        instrument_type="stock",
+        jurisdiction="DE",
+    ):
+        return self._run(
+            super().neon_search(
+                query=query,
+                page=page,
+                page_size=page_size,
+                instrument_type=instrument_type,
+                jurisdiction=jurisdiction,
+            )
         )
 
     def neon_news(self, isin):
-        return asyncio.get_event_loop().run_until_complete(
-            self.get_one(super().neon_news(isin))
-        )
+        return self._run(super().neon_news(isin))
 
     def neon_search_tags(self):
         return self._run(super().neon_search_tags())
 
     def orders(self):
-        return asyncio.get_event_loop().run_until_complete(
-            self.get_one(super().orders())
-        )
+        return self._run(super().orders())
 
     def portfolio(self):
-        return asyncio.get_event_loop().run_until_complete(
-            self.get_one(super().portfolio())
-        )
+        return self._run(super().portfolio())
 
     def portfolio_aggregate_history(self, range="max"):
-        return asyncio.get_event_loop().run_until_complete(
-            self.get_one(super().portfolio_aggregate_history(range=range))
-        )
+        return self._run(super().portfolio_aggregate_history(range=range))
 
     def stock_detail_dividends(self, isin):
-        return asyncio.get_event_loop().run_until_complete(
-            self.get_one(super().stock_detail_dividends(isin))
-        )
+        return self._run(super().stock_detail_dividends(isin))
 
     def stock_detail_kpis(self, isin):
-        return asyncio.get_event_loop().run_until_complete(
-            self.get_one(super().stock_detail_kpis(isin))
-        )
+        return self._run(super().stock_detail_kpis(isin))
 
     def stock_details(self, isin):
-        return asyncio.get_event_loop().run_until_complete(
-            self.get_one(super().stock_details(isin))
-        )
+        return self._run(super().stock_details(isin))
 
     def ticker(self, isin, exchange="LSX"):
-        return asyncio.get_event_loop().run_until_complete(
-            self.get_one(super().ticker(isin, exchange))
-        )
+        return self._run(super().ticker(isin, exchange))
 
     def timeline(self, after=None):
-        return asyncio.get_event_loop().run_until_complete(
-            self.get_one(super().timeline(after=after))
-        )
+        return self._run(super().timeline(after=after))
 
     def timeline_detail(self, id):
-        return asyncio.get_event_loop().run_until_complete(
-            self.get_one(super().timeline_detail(id=id))
-        )
+        return self._run(super().timeline_detail(id=id))
 
     def account_pairs(self):
         return self._run(super().account_pairs())
