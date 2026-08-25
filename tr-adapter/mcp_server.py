@@ -256,6 +256,24 @@ async def get_adapter_status() -> dict:
 
 
 @mcp.tool()
+@log_tool_call("renew_session")
+async def renew_session(authenticator_code: str | None = None) -> dict:
+    """Warm a cold Trade Republic session (soft renew, then optional app push).
+
+    Call this when account tools fail with login_required / session_expired / HTTP 401.
+    Soft cookie/TR_TOKEN renew runs first. If cookies are fully dead and TR_PHONE/TR_PIN
+    are set, starts a web login and returns awaiting_push_confirm — ask the user to
+    confirm in the Trade Republic app, then call this tool again.
+    Never switch to other market-data providers for account/portfolio data.
+    """
+    try:
+        return await get_client().renew_session(authenticator_code=authenticator_code)
+    except Exception as exc:
+        raise_structured(exc)
+        raise  # pragma: no cover
+
+
+@mcp.tool()
 @log_tool_call("get_account_summary")
 async def get_account_summary() -> dict:
     """Return account cash balances, buying power, and portfolio status.

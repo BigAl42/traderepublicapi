@@ -382,11 +382,11 @@ class TRApi:
         )
         self._raise_login_error(r)
 
-    def _login_web(self, **kwargs):
-        if kwargs.get("resume", True) and self._resume_web_session():
-            print("Resumed saved Trade Republic web session.")
-            return True
+    def start_web_login(self) -> dict:
+        """Start web login (push / authenticator). Does not wait for confirmation.
 
+        Returns a dict with process_id, status, required_action, and raw process.
+        """
         r = self.session.post(
             f"{self.url}/api/v2/auth/web/login",
             json={"phoneNumber": self.number, "pin": self.pin},
@@ -399,27 +399,71 @@ class TRApi:
         if not self._process_id:
             raise TRapiException(f"Web login did not return processId: {data}")
 
-        try:
-            self._required_action = self._weblogin_process().get("requiredAction")
-        except TRapiException:
-            self._required_action = None
+        process = self._weblogin_process()
+        self._required_action = process.get("requiredAction")
+        return {
+            "process_id": self._process_id,
+            "status": process.get("status"),
+            "required_action": self._required_action,
+            "expires_at": process.get("expiresAt"),
+            "process": process,
+        }
 
-        if self._required_action == "AUTHENTICATOR_VERIFICATION":
-            code = kwargs.get("authenticator_code") or os.environ.get("TR_AUTHENTICATOR_CODE")
-            if not code:
-                code = input("Authenticator code: ")
-            self._complete_authenticator(code)
-        else:
-            self._await_web_confirmation(timeout=kwargs.get("login_timeout", 120))
+    def poll_web_login(self) -> dict:
+        """Poll an in-flight web login process started by start_web_login()."""
+        if not self._process_id:
+            raise TRapiException("No web login process in progress.")
+        process = self._weblogin_process()
+        self._required_action = process.get("requiredAction") or self._required_action
+        return {
+            "process_id": self._process_id,
+            "status": process.get("status"),
+            "required_action": self._required_action,
+            "expires_at": process.get("expiresAt"),
+            "process": process,
+        }
 
+    def complete_web_login_authenticator(self, code: str) -> dict:
+        """Submit authenticator code for a pending web login process."""
+        if not code or not str(code).strip():
+            raise TRapiException("Authenticator code is required.")
+        self._complete_authenticator(str(code).strip())
+        return self.poll_web_login()
+
+    def finalize_web_login(self) -> bool:
+        """Persist cookies after the login process is CONFIRMED/COMPLETED."""
+        if not self._process_id:
+            raise TRapiException("No web login process in progress.")
         self._save_cookies()
         self._refresh_web_session()
-        self.refresh_account_settings()
+        data = self.refresh_account_settings()
+        if data is None:
+            return False
         cookie = next(
             (c.value for c in self.session.cookies if c.name == "tr_session"),
             None,
         )
         self.sessionToken = cookie
+        self._process_id = None
+        self._required_action = None
+        return bool(cookie)
+
+    def _login_web(self, **kwargs):
+        if kwargs.get("resume", True) and self._resume_web_session():
+            print("Resumed saved Trade Republic web session.")
+            return True
+
+        started = self.start_web_login()
+        if started.get("required_action") == "AUTHENTICATOR_VERIFICATION":
+            code = kwargs.get("authenticator_code") or os.environ.get("TR_AUTHENTICATOR_CODE")
+            if not code:
+                code = input("Authenticator code: ")
+            self.complete_web_login_authenticator(code)
+        else:
+            self._await_web_confirmation(timeout=kwargs.get("login_timeout", 120))
+
+        if not self.finalize_web_login():
+            raise TRapiException("Web login finished but session cookies were not established.")
         return True
 
     def login(self, **kwargs):

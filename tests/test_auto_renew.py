@@ -166,8 +166,97 @@ class AutoRenewClientTest(unittest.IsolatedAsyncioTestCase):
         )
         payload = error_payload(exc)
         self.assertEqual(payload["code"], "login_required")
+        self.assertIn("renew_session", payload["guidance"])
         self.assertIn("Do NOT switch", payload["guidance"])
         self.assertIn("ClawStreet", payload["guidance"])
+
+    async def test_renew_session_soft_refresh_ready(self):
+        from tr_client import TradeRepublicClient
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cookies = Path(tmp) / "c.txt"
+            circuit = Path(tmp) / "circuit.json"
+            with patch("tr_client.TRApi") as api_cls:
+                api = MagicMock()
+                api.cookies_file = cookies
+                api._process_id = None
+                api.reset_transport = AsyncMock()
+                api_cls.return_value = api
+                with patch("tr_client.circuit_state_path_for_cookies", return_value=circuit):
+                    client = TradeRepublicClient(token="tok")
+                    client._api = api
+                    client._soft_refresh_session = AsyncMock(return_value=True)
+                    client._last_renew_http_status = 200
+                    result = await client.renew_session()
+                    self.assertEqual(result["status"], "ready")
+                    self.assertEqual(result["method"], "soft_refresh")
+
+    async def test_renew_session_starts_push_when_soft_fails(self):
+        from tr_client import TradeRepublicClient
+
+        with patch.dict(
+            os.environ,
+            {
+                "TR_MCP_RENEW_ALLOW_PUSH": "1",
+                "TR_PHONE": "+491111111111",
+                "TR_PIN": "1234",
+            },
+            clear=False,
+        ):
+            with tempfile.TemporaryDirectory() as tmp:
+                cookies = Path(tmp) / "c.txt"
+                circuit = Path(tmp) / "circuit.json"
+                with patch("tr_client.TRApi") as api_cls:
+                    api = MagicMock()
+                    api.cookies_file = cookies
+                    api._process_id = None
+                    api.reset_transport = AsyncMock()
+                    api.start_web_login.return_value = {
+                        "process_id": "proc-1",
+                        "status": "PENDING",
+                        "required_action": None,
+                        "expires_at": None,
+                    }
+                    api_cls.return_value = api
+                    with patch("tr_client.circuit_state_path_for_cookies", return_value=circuit):
+                        client = TradeRepublicClient(token="tok")
+                        client._api = api
+                        client._soft_refresh_session = AsyncMock(return_value=False)
+                        client._try_resume = AsyncMock(return_value=False)
+                        client._last_renew_http_status = 401
+                        result = await client.renew_session()
+                        self.assertEqual(result["status"], "awaiting_push_confirm")
+                        self.assertEqual(result["process_id"], "proc-1")
+                        self.assertIn("confirm", result["guidance"].lower())
+                        api.start_web_login.assert_called_once()
+
+    async def test_renew_session_finalizes_after_confirm(self):
+        from tr_client import TradeRepublicClient
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cookies = Path(tmp) / "c.txt"
+            circuit = Path(tmp) / "circuit.json"
+            with patch("tr_client.TRApi") as api_cls:
+                api = MagicMock()
+                api.cookies_file = cookies
+                api._process_id = "proc-1"
+                api.reset_transport = AsyncMock()
+                api.poll_web_login.return_value = {
+                    "process_id": "proc-1",
+                    "status": "CONFIRMED",
+                    "required_action": None,
+                    "expires_at": None,
+                }
+                api.finalize_web_login.return_value = True
+                api_cls.return_value = api
+                with patch("tr_client.circuit_state_path_for_cookies", return_value=circuit):
+                    client = TradeRepublicClient(token="tok")
+                    client._api = api
+                    client._login_process_id = "proc-1"
+                    result = await client.renew_session()
+                    self.assertEqual(result["status"], "ready")
+                    self.assertEqual(result["method"], "push_login")
+                    self.assertTrue(client._session_ready)
 
 
 if __name__ == "__main__":
