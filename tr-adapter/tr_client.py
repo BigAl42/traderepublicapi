@@ -194,7 +194,7 @@ class TradeRepublicClient:
             LOGGER.debug("Async transport reset failed: %s", exc)
             self._api.reset_transport_sync()
 
-    def _map_error(self, exc: Exception) -> TradeRepublicClientError:
+    def _map_error(self, exc: Exception, *, record: bool = True) -> TradeRepublicClientError:
         if isinstance(exc, SessionBlockedError):
             return TradeRepublicClientError(
                 str(exc),
@@ -205,7 +205,7 @@ class TradeRepublicClient:
         if isinstance(exc, TradeRepublicClientError):
             return exc
         classified = classify_auth_error(exc)
-        if classified.kind in {
+        if record and classified.kind in {
             ErrorKind.RATE_LIMITED,
             ErrorKind.AUTH_FAILED,
             ErrorKind.SESSION_EXPIRED,
@@ -358,9 +358,12 @@ class TradeRepublicClient:
             status = int(getattr(response, "status_code", 500) or 500)
             self._last_renew_http_status = status
             if status >= 400:
+                # Dead cookies poison public WebSocket connects — drop in-memory session.
+                self._api.clear_tr_session_cookie()
                 return False
             data = self._api.refresh_account_settings()
             if data is None:
+                self._api.clear_tr_session_cookie()
                 return False
             self._persist_cookies()
             self._session_ready = True
@@ -628,7 +631,8 @@ class TradeRepublicClient:
                 "Credentials/cookies present but session not warm in this process yet. "
                 "Authenticated tools auto soft-renew; if that fails call renew_session "
                 "(confirm app push when status is awaiting_push_confirm). "
-                "Do not switch data providers."
+                "Public tools (charts/search) retry anonymously if cookies are dead. "
+                "Do not switch data providers for account data."
             )
             overall = "cold"
         else:
@@ -801,12 +805,36 @@ class TradeRepublicClient:
             return None
 
     async def _query_public(self, coro_or_factory: Any) -> Any:
-        """WebSocket query that does not require a logged-in session."""
+        """WebSocket query that does not require a logged-in session.
+
+        Expired ``tr_session`` cookies are still attached to ``wss://`` connects and
+        can yield HTTP 401 for charts/search. On auth failure, drop the cookie and
+        retry once anonymously — do not trip the auth circuit for that case.
+        """
         factory = self._as_coro_factory(coro_or_factory)
         try:
             return await self._query(factory())
         except (TRapiException, TRapiExcServerErrorState) as exc:
-            raise self._map_error(exc) from exc
+            mapped = self._map_error(exc, record=False)
+            if mapped.kind not in {
+                ErrorKind.SESSION_EXPIRED,
+                ErrorKind.LOGIN_REQUIRED,
+                ErrorKind.AUTH_FAILED,
+            }:
+                raise mapped from exc
+            if not self._api._has_tr_session_cookie() and not self._api.sessionToken:
+                raise mapped from exc
+            LOGGER.info(
+                "Public WS rejected with %s — clearing dead tr_session and retrying anonymously",
+                mapped.kind.value,
+            )
+            self._api.clear_tr_session_cookie()
+            self._session_ready = False
+            await self._reset_transport()
+            try:
+                return await self._query(factory())
+            except (TRapiException, TRapiExcServerErrorState) as retry_exc:
+                raise self._map_error(retry_exc, record=False) from retry_exc
 
     @staticmethod
     def _normalize_isin(ticker: str) -> str:

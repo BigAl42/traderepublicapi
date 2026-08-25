@@ -216,6 +216,27 @@ class TRApi:
     def _has_tr_session_cookie(self):
         return any(c.name == "tr_session" for c in self.session.cookies)
 
+    def clear_tr_session_cookie(self) -> None:
+        """Drop in-memory tr_session so WebSocket can reconnect anonymously.
+
+        Expired cookies are otherwise attached to every ``wss://`` connect and
+        cause HTTP 401 even for public subscriptions (charts, search, news).
+        Does not delete the cookie file on disk.
+        """
+        try:
+            self.session.cookies.clear(domain=".traderepublic.com", path="/", name="tr_session")
+        except (KeyError, TypeError, AttributeError):
+            expired = [c for c in list(self.session.cookies) if c.name == "tr_session"]
+            for cookie in expired:
+                try:
+                    self.session.cookies.clear(
+                        domain=cookie.domain, path=cookie.path, name=cookie.name
+                    )
+                except (KeyError, TypeError, AttributeError):
+                    pass
+        self.sessionToken = None
+        self._session_expires_at = 0
+
     def _resume_web_session(self):
         """Resume using cookie jar and/or already-injected in-memory tr_session.
 
@@ -226,19 +247,7 @@ class TRApi:
             return False
         data = self.refresh_account_settings()
         if data is None:
-            # Drop only the session cookie — keep other jar state for diagnostics.
-            try:
-                self.session.cookies.clear(domain=".traderepublic.com", path="/", name="tr_session")
-            except (KeyError, TypeError, AttributeError):
-                expired = [c for c in list(self.session.cookies) if c.name == "tr_session"]
-                for cookie in expired:
-                    try:
-                        self.session.cookies.clear(
-                            domain=cookie.domain, path=cookie.path, name=cookie.name
-                        )
-                    except (KeyError, TypeError, AttributeError):
-                        pass
-            self.sessionToken = None
+            self.clear_tr_session_cookie()
             return False
         cookie = next(
             (c.value for c in self.session.cookies if c.name == "tr_session"),

@@ -1,4 +1,4 @@
-"""Tests for autonomous session renew helpers."""
+"""Tests for autonomous session renew helpers and public WS cookie poison handling."""
 
 from __future__ import annotations
 
@@ -257,6 +257,80 @@ class AutoRenewClientTest(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(result["status"], "ready")
                     self.assertEqual(result["method"], "push_login")
                     self.assertTrue(client._session_ready)
+
+
+class PublicWsDeadCookieTest(unittest.IsolatedAsyncioTestCase):
+    def test_clear_tr_session_cookie(self):
+        from http.cookiejar import Cookie
+
+        api = TRApi("+49000000000", "0000", cookies_file="/tmp/no-cookies-public-ws")
+        cookie = Cookie(
+            version=0,
+            name="tr_session",
+            value="dead",
+            port=None,
+            port_specified=False,
+            domain=".traderepublic.com",
+            domain_specified=True,
+            domain_initial_dot=True,
+            path="/",
+            path_specified=True,
+            secure=True,
+            expires=None,
+            discard=True,
+            comment=None,
+            comment_url=None,
+            rest={"HttpOnly": ""},
+        )
+        api.session.cookies.set_cookie(cookie)
+        api.sessionToken = "dead"
+        api._session_expires_at = time.time() + 100
+        self.assertTrue(api._has_tr_session_cookie())
+        api.clear_tr_session_cookie()
+        self.assertFalse(api._has_tr_session_cookie())
+        self.assertIsNone(api.sessionToken)
+        self.assertEqual(api._session_expires_at, 0)
+
+    async def test_query_public_retries_anonymously_after_401(self):
+        from trapi.api import TRapiException
+        from tr_client import TradeRepublicClient
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cookies = Path(tmp) / "c.txt"
+            circuit = Path(tmp) / "circuit.json"
+            with patch("tr_client.TRApi") as api_cls:
+                api = MagicMock()
+                api.cookies_file = cookies
+                api.sessionToken = "dead"
+                api._has_tr_session_cookie.return_value = True
+                api.clear_tr_session_cookie = MagicMock()
+                api.reset_transport = AsyncMock()
+                api_cls.return_value = api
+                with patch("tr_client.circuit_state_path_for_cookies", return_value=circuit):
+                    client = TradeRepublicClient(token="tok")
+                    client._api = api
+                    calls = {"n": 0}
+
+                    def factory():
+                        calls["n"] += 1
+
+                        async def coro():
+                            return {"bars": [1]}
+
+                        return coro()
+
+                    async def query_side_effect(coro):
+                        await coro
+                        if calls["n"] == 1:
+                            raise TRapiException("Connection Error: HTTP 401 Unauthorized")
+                        return {"bars": [1]}
+
+                    client._query = AsyncMock(side_effect=query_side_effect)
+                    result = await client._query_public(factory)
+                    self.assertEqual(result, {"bars": [1]})
+                    self.assertEqual(calls["n"], 2)
+                    api.clear_tr_session_cookie.assert_called_once()
+                    self.assertFalse(client._session_ready)
 
 
 if __name__ == "__main__":

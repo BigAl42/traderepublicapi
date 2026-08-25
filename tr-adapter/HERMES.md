@@ -106,6 +106,12 @@ Paste or adapt into the Hermes agent system prompt.
 - If `status=ready`: retry the **same** original account tool once.
 - Call `get_adapter_status` to inspect `last_renew_result` / `last_renew_http_status`.
 
+### When charts/search return 401 but no account is needed
+
+Dead `tr_session` cookies used to poison the public WebSocket connect. The adapter
+now drops the in-memory session cookie and retries anonymously. Account tools still
+need `renew_session` / fresh cookies.
+
 ### When `code` is `rate_limited` or status is `cooldown`
 
 - Stop all TR tool calls until `retry_after_seconds` elapsed.
