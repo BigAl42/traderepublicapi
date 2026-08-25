@@ -97,7 +97,7 @@ async def _run_checks():
         print("       >>> Open the Trade Republic app and CONFIRM the login push! <<<")
 
     try:
-        client._ensure_session()
+        await client._ensure_session()
         print("[2/4]  Session established ✓")
     except TradeRepublicClientError as exc:
         print(f"ERROR: Login failed: {exc}")
