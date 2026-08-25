@@ -100,6 +100,14 @@ class TradeRepublicClient:
         self._allow_interactive_login = os.getenv(
             "TR_MCP_ALLOW_INTERACTIVE_LOGIN", "0"
         ).strip().lower() in ("1", "true", "yes")
+        # Soft cookie/token renew on cold/401. Default ON — no push login.
+        self._auto_renew = os.getenv("TR_MCP_AUTO_RENEW", "1").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        self._last_renew_at: float | None = None
+        self._last_renew_result: str | None = None
 
         self._api = TRApi(
             phone or "+0000000000",
@@ -202,12 +210,20 @@ class TradeRepublicClient:
 
     async def _try_resume(self) -> bool:
         """Cookie/token resume only — never starts a push login."""
+        # Prefer latest disk cookies (may have been warmed by check_login offline).
+        self._api.load_cookies_from_disk()
+        # Re-read TR_TOKEN in case the environment was updated without respawn.
+        env_token = os.getenv("TR_TOKEN", "").strip()
+        if env_token:
+            self._token = env_token
         if self._token:
             self._inject_token_on_api()
         if self._api._resume_web_session():
             self._persist_cookies()
             self._session_ready = True
             self._circuit.record_success()
+            self._last_renew_at = time.time()
+            self._last_renew_result = "resumed"
             # New HTTP session cookies must not reuse a stale websocket.
             await self._reset_transport()
             LOGGER.info("Resumed Trade Republic session from cookies/token")
@@ -234,17 +250,75 @@ class TradeRepublicClient:
         self._persist_cookies()
         self._session_ready = True
         self._circuit.record_success()
+        self._last_renew_at = time.time()
+        self._last_renew_result = "interactive_login"
+
+    async def _recover_session(self) -> bool:
+        """Best-effort autonomous renew after 401 / cold session.
+
+        Order: soft refresh → disk cookies + TR_TOKEN resume → optional push login.
+        Never invents alternative data sources — either renews or fails clearly.
+        """
+        if not self._auto_renew:
+            self._last_renew_result = "disabled"
+            self._last_renew_at = time.time()
+            return False
+        if self._circuit.is_open():
+            self._last_renew_result = "circuit_open"
+            self._last_renew_at = time.time()
+            return False
+
+        await self._invalidate_session_async()
+
+        if await self._soft_refresh_session():
+            self._last_renew_result = "soft_refresh"
+            self._last_renew_at = time.time()
+            LOGGER.info("Session recovered via soft refresh")
+            return True
+
+        if await self._try_resume():
+            LOGGER.info("Session recovered via cookie/token resume")
+            return True
+
+        if self._allow_interactive_login and os.getenv("TR_PHONE") and os.getenv("TR_PIN"):
+            try:
+                await asyncio.to_thread(self._interactive_login)
+                await self._reset_transport()
+                LOGGER.info("Session recovered via interactive login")
+                return True
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.info("Interactive login renew failed: %s", redact_secrets(str(exc)))
+                self._last_renew_result = "interactive_failed"
+                self._last_renew_at = time.time()
+                return False
+
+        self._last_renew_result = "failed"
+        self._last_renew_at = time.time()
+        return False
 
     async def _ensure_session(self, *, allow_login: bool = True) -> None:
         """Ensure a usable web session.
 
-        Cookie-first. Interactive login only when allow_login=True and circuit is closed.
+        Cookie-first. Soft-renew when expiry approaches. Interactive login only when
+        allow_login=True and TR_MCP_ALLOW_INTERACTIVE_LOGIN=1.
         """
         if self._session_ready:
-            return
-        if not self._has_credentials:
+            if self._auto_renew and self._api.session_needs_refresh():
+                if await self._soft_refresh_session():
+                    return
+                self._session_ready = False
+            else:
+                return
+
+        phone = bool(os.getenv("TR_PHONE", "").strip())
+        pin = bool(os.getenv("TR_PIN", "").strip())
+        self._has_credentials = bool(
+            self._token or os.getenv("TR_TOKEN", "").strip() or (phone and pin)
+        )
+        if not self._has_credentials and not self._api.cookies_file.is_file():
             raise TradeRepublicClientError(
-                "Missing credentials. Set TR_TOKEN (session) or TR_PHONE and TR_PIN in the environment.",
+                "Missing credentials. Set TR_TOKEN (session) or TR_PHONE and TR_PIN in the environment, "
+                "or place a warm cookie file at TR_COOKIES_FILE.",
                 retryable=False,
                 kind=ErrorKind.CONFIG,
             )
@@ -257,8 +331,8 @@ class TradeRepublicClient:
             if not allow_login:
                 raise TradeRepublicClientError(
                     "No warm Trade Republic session available for this action. "
-                    "Refresh cookies offline with check_login.py, set TR_TOKEN, "
-                    "and avoid write calls during auth cooldown.",
+                    "The adapter already tried cookie/token renew. Warm cookies offline "
+                    "with check_login.py (do not switch to other data providers).",
                     retryable=True,
                     kind=ErrorKind.LOGIN_REQUIRED,
                 )
@@ -272,6 +346,8 @@ class TradeRepublicClient:
     async def _soft_refresh_session(self) -> bool:
         """Refresh web session endpoint without triggering login."""
         try:
+            # Reload disk cookies first — may be fresher than in-memory jar.
+            self._api.load_cookies_from_disk()
             response = self._api._refresh_web_session()
             if getattr(response, "status_code", 500) >= 400:
                 return False
@@ -280,11 +356,14 @@ class TradeRepublicClient:
                 return False
             self._persist_cookies()
             self._session_ready = True
+            self._circuit.record_success()
+            self._last_renew_at = time.time()
+            self._last_renew_result = "soft_refresh"
             # Force websocket reconnect with refreshed cookies.
             await self._reset_transport()
             return True
         except Exception as exc:  # noqa: BLE001
-            LOGGER.info("Soft session refresh failed: %s", exc)
+            LOGGER.info("Soft session refresh failed: %s", redact_secrets(str(exc)))
             return False
 
     async def _ensure_session_for_write(self) -> None:
@@ -342,7 +421,8 @@ class TradeRepublicClient:
         elif cookies_path.is_file() or bool(self._token):
             guidance = (
                 "Credentials/cookies present but session not warm in this process yet. "
-                "First authenticated read will try resume; or run check_login.py offline."
+                "Next authenticated tool call will auto-renew (TR_MCP_AUTO_RENEW). "
+                "If renew fails, run check_login.py offline — do not switch data providers."
             )
             overall = "cold"
         else:
@@ -360,6 +440,10 @@ class TradeRepublicClient:
             "cookies_file": str(cookies_path),
             "cookies_file_exists": cookies_path.is_file(),
             "allow_interactive_login": self._allow_interactive_login,
+            "auto_renew": self._auto_renew,
+            "last_renew_at": self._last_renew_at,
+            "last_renew_result": self._last_renew_result,
+            "session_expires_at": getattr(self._api, "_session_expires_at", None) or None,
             "write_enabled": write_enabled(),
             "auth_circuit_open": cooldown > 0,
             "auth_cooldown_remaining_seconds": cooldown,
@@ -430,39 +514,87 @@ class TradeRepublicClient:
                 await self._reset_transport()
             raise
 
-    async def _query_auth(self, coro: Any, *, mutating: bool = False) -> Any:
-        """Authenticated WebSocket query."""
+    @staticmethod
+    def _as_coro_factory(coro_or_factory: Any):
+        """Normalize a coroutine or zero-arg factory for retryable queries."""
+        if asyncio.iscoroutine(coro_or_factory):
+            box: list[Any] = [coro_or_factory]
+
+            def once() -> Any:
+                if not box:
+                    raise TradeRepublicClientError(
+                        "Cannot retry Trade Republic query: subscription was already consumed. "
+                        "Call the tool again once — the adapter will renew the session first.",
+                        retryable=True,
+                        kind=ErrorKind.SESSION_EXPIRED,
+                        retry_after_seconds=2,
+                    )
+                return box.pop()
+
+            return once
+        if callable(coro_or_factory):
+            return coro_or_factory
+        raise TypeError("Expected coroutine or zero-arg callable factory")
+
+    async def _query_auth(self, coro_or_factory: Any, *, mutating: bool = False) -> Any:
+        """Authenticated WebSocket query with autonomous session renew on auth failure."""
+        factory = self._as_coro_factory(coro_or_factory)
         if mutating:
             await self._ensure_session_for_write()
         else:
             await self._ensure_session(allow_login=True)
             await self._throttle_read()
         try:
-            result = await self._query(coro)
+            result = await self._query(factory())
             if mutating:
                 self._persist_cookies()
             return result
         except (TRapiException, TRapiExcServerErrorState) as exc:
             mapped = self._map_error(exc)
-            if (
-                not mutating
-                and mapped.kind in {ErrorKind.SESSION_EXPIRED, ErrorKind.SERVER}
-                and not self._circuit.is_open()
-            ):
-                await self._invalidate_session_async()
-                try:
-                    if await self._try_resume():
-                        return await self._query(coro)
-                except (TRapiException, TRapiExcServerErrorState) as retry_exc:
-                    raise self._map_error(retry_exc) from retry_exc
-            raise mapped from exc
+            if mapped.kind not in {
+                ErrorKind.SESSION_EXPIRED,
+                ErrorKind.SERVER,
+                ErrorKind.LOGIN_REQUIRED,
+                ErrorKind.AUTH_FAILED,
+            }:
+                raise mapped from exc
+            if self._circuit.is_open():
+                raise mapped from exc
+            recovered = await self._recover_session()
+            if not recovered:
+                # Strong guidance: agent must not switch providers.
+                raise TradeRepublicClientError(
+                    (
+                        "Trade Republic session is cold and automatic renew failed. "
+                        "Warm the session offline with check_login.py or set a fresh TR_TOKEN. "
+                        "Do NOT fall back to other market-data providers for account/portfolio tools."
+                    ),
+                    retryable=True,
+                    kind=ErrorKind.LOGIN_REQUIRED,
+                    retry_after_seconds=self._circuit.remaining_cooldown_seconds() or 30,
+                ) from exc
+            try:
+                result = await self._query(factory())
+                if mutating:
+                    self._persist_cookies()
+                return result
+            except (TRapiException, TRapiExcServerErrorState) as retry_exc:
+                raise self._map_error(retry_exc) from retry_exc
 
-    async def _try_query_auth(self, coro: Any) -> Any | None:
+    async def _try_query_auth(self, coro_or_factory: Any) -> Any | None:
         """Authenticated query; returns None when TR has no data for this field."""
         try:
-            return await self._query_auth(coro)
+            return await self._query_auth(coro_or_factory)
         except TradeRepublicClientError:
             return None
+
+    async def _query_public(self, coro_or_factory: Any) -> Any:
+        """WebSocket query that does not require a logged-in session."""
+        factory = self._as_coro_factory(coro_or_factory)
+        try:
+            return await self._query(factory())
+        except (TRapiException, TRapiExcServerErrorState) as exc:
+            raise self._map_error(exc) from exc
 
     @staticmethod
     def _normalize_isin(ticker: str) -> str:
@@ -482,11 +614,11 @@ class TradeRepublicClient:
     ) -> dict[str, Any]:
         """Fundamental stock analysis: details, KPIs, dividends, performance."""
         isin = self._normalize_isin(ticker)
-        instrument = await self._query_auth(self._api.instrument(isin))
-        details = await self._query_auth(self._api.stock_details(isin))
-        kpis = await self._try_query_auth(self._api.stock_detail_kpis(isin))
-        dividends = await self._try_query_auth(self._api.stock_detail_dividends(isin))
-        performance = await self._try_query_auth(self._api.performance(isin))
+        instrument = await self._query_auth(lambda: self._api.instrument(isin))
+        details = await self._query_auth(lambda: self._api.stock_details(isin))
+        kpis = await self._try_query_auth(lambda: self._api.stock_detail_kpis(isin))
+        dividends = await self._try_query_auth(lambda: self._api.stock_detail_dividends(isin))
+        performance = await self._try_query_auth(lambda: self._api.performance(isin))
         position = await self._find_position(isin) if include_position else None
         return {
             "ticker": isin,
@@ -506,9 +638,9 @@ class TradeRepublicClient:
     ) -> dict[str, Any]:
         """ETF analysis: details and portfolio composition."""
         isin = self._normalize_isin(ticker)
-        instrument = await self._query_auth(self._api.instrument(isin))
-        details = await self._query_auth(self._api.etf_details(isin))
-        composition = await self._try_query_auth(self._api.etf_composition(isin))
+        instrument = await self._query_auth(lambda: self._api.instrument(isin))
+        details = await self._query_auth(lambda: self._api.etf_details(isin))
+        composition = await self._try_query_auth(lambda: self._api.etf_composition(isin))
         position = await self._find_position(isin) if include_position else None
         return {
             "ticker": isin,
@@ -526,8 +658,8 @@ class TradeRepublicClient:
     ) -> dict[str, Any]:
         """Crypto asset analysis."""
         isin = self._normalize_isin(ticker)
-        instrument = await self._query_auth(self._api.instrument(isin))
-        details = await self._query_auth(self._api.crypto_details(isin))
+        instrument = await self._query_auth(lambda: self._api.instrument(isin))
+        details = await self._query_auth(lambda: self._api.crypto_details(isin))
         position = await self._find_position(isin) if include_position else None
         return {
             "ticker": isin,
@@ -535,16 +667,6 @@ class TradeRepublicClient:
             "details": details,
             "position": position,
         }
-
-    async def _query_public(self, coro: Any) -> Any:
-        """WebSocket query that does not require a logged-in session."""
-        try:
-            await coro
-            return await asyncio.wait_for(
-                self._api.start(receive_one=True), timeout=self._timeout
-            )
-        except (TRapiException, TRapiExcServerErrorState) as exc:
-            raise self._map_error(exc) from exc
 
     INSTRUMENT_TYPES = TRApi.instrument_list
     RANGE_VALUES = TRApi.range_list
@@ -572,15 +694,13 @@ class TradeRepublicClient:
                 retryable=False,
                 kind=ErrorKind.CONFIG,
             )
-        results = await self._query_public(
-            self._api.neon_search(
+        results = await self._query_public(lambda: self._api.neon_search(
                 query=query,
                 page=page,
                 page_size=page_size,
                 instrument_type=instrument_type,
                 jurisdiction=jurisdiction,
-            )
-        )
+            ))
         return {
             "query": query,
             "instrument_type": instrument_type,
@@ -606,15 +726,13 @@ class TradeRepublicClient:
                 retryable=False,
                 kind=ErrorKind.CONFIG,
             )
-        aggregations = await self._query_public(
-            self._api.neon_search_aggregations(
+        aggregations = await self._query_public(lambda: self._api.neon_search_aggregations(
                 query=query,
                 page=page,
                 page_size=page_size,
                 instrument_type=instrument_type,
                 jurisdiction=jurisdiction,
-            )
-        )
+            ))
         return {
             "query": query,
             "instrument_type": instrument_type,
@@ -626,14 +744,12 @@ class TradeRepublicClient:
 
     async def get_search_tags(self) -> dict[str, Any]:
         """Available neon search tags (no login required)."""
-        tags = await self._query_public(self._api.neon_search_tags())
+        tags = await self._query_public(lambda: self._api.neon_search_tags())
         return {"tags": tags}
 
     async def get_search_suggested_tags(self, query: str = "") -> dict[str, Any]:
         """Suggested search tags for a query string (no login required)."""
-        suggestions = await self._query_public(
-            self._api.neon_search_suggested_tags(query=query)
-        )
+        suggestions = await self._query_public(lambda: self._api.neon_search_suggested_tags(query=query))
         return {"query": query, "suggested_tags": suggestions}
 
     async def get_price_history(
@@ -656,9 +772,7 @@ class TradeRepublicClient:
                 retryable=False,
                 kind=ErrorKind.CONFIG,
             )
-        history = await self._query_public(
-            self._api.aggregate_history_light(isin, range=range, exchange=exchange)
-        )
+        history = await self._query_public(lambda: self._api.aggregate_history_light(isin, range=range, exchange=exchange))
         return {
             "ticker": isin,
             "range": range,
@@ -669,7 +783,7 @@ class TradeRepublicClient:
     async def get_stock_news(self, ticker: str) -> dict[str, Any]:
         """News articles for an ISIN (no login required)."""
         isin = ticker.strip().upper()
-        news = await self._query_public(self._api.neon_news(isin))
+        news = await self._query_public(lambda: self._api.neon_news(isin))
         return {"ticker": isin, "news": news}
 
     @staticmethod
@@ -684,10 +798,10 @@ class TradeRepublicClient:
 
     async def get_balance_info(self) -> dict[str, Any]:
         """Cash balances and buying power (read-only)."""
-        cash = await self._query_auth(self._api.cash())
-        available = await self._query_auth(self._api.available_cash())
-        payout = await self._query_auth(self._api.available_cash_for_payout())
-        status = await self._query_auth(self._api.portfolio_status())
+        cash = await self._query_auth(lambda: self._api.cash())
+        available = await self._query_auth(lambda: self._api.available_cash())
+        payout = await self._query_auth(lambda: self._api.available_cash_for_payout())
+        status = await self._query_auth(lambda: self._api.portfolio_status())
 
         cash_accounts = self._unwrap_cash(cash)
         available_accounts = self._unwrap_cash(available)
@@ -723,7 +837,7 @@ class TradeRepublicClient:
         }
 
     async def _load_portfolio(self) -> dict[str, Any]:
-        return await self._query_auth(self._api.compact_portfolio_by_type())
+        return await self._query_auth(lambda: self._api.compact_portfolio_by_type())
 
     async def get_holdings(self) -> list[dict[str, Any]]:
         """All active portfolio positions."""
@@ -766,9 +880,7 @@ class TradeRepublicClient:
                 retryable=False,
                 kind=ErrorKind.CONFIG,
             )
-        history = await self._query_auth(
-            self._api.portfolio_aggregate_history(range=range)
-        )
+        history = await self._query_auth(lambda: self._api.portfolio_aggregate_history(range=range))
         return {"range": range, "history": history}
 
     @staticmethod
@@ -805,7 +917,7 @@ class TradeRepublicClient:
     async def _verify_watchlist_membership(self, isin: str) -> bool | None:
         """Return True/False if membership is known, None if verify failed/timed out."""
         try:
-            watchlist = await self._query_auth(self._api.watchlist())
+            watchlist = await self._query_auth(lambda: self._api.watchlist())
         except Exception as exc:  # noqa: BLE001 — verify must not mask write outcome
             LOGGER.info("Watchlist verify failed: %s", redact_secrets(str(exc)))
             return None
@@ -813,7 +925,7 @@ class TradeRepublicClient:
 
     async def get_watchlist(self) -> dict[str, Any]:
         """Current watchlist instruments (login required)."""
-        watchlist = await self._query_auth(self._api.watchlist())
+        watchlist = await self._query_auth(lambda: self._api.watchlist())
         items = watchlist if isinstance(watchlist, list) else watchlist
         return {"watchlist": items}
 
@@ -821,7 +933,7 @@ class TradeRepublicClient:
         """Add an ISIN to the account watchlist (mutating, login required)."""
         isin = self._normalize_isin(ticker)
         self._guard_write_backoff("add_to_watchlist")
-        result = await self._query_auth(self._api.add_to_watchlist(isin), mutating=True)
+        result = await self._query_auth(lambda: self._api.add_to_watchlist(isin), mutating=True)
         present = await self._verify_watchlist_membership(isin)
         if present is True:
             self._last_uncertain_write_at = None
@@ -859,9 +971,7 @@ class TradeRepublicClient:
         """Remove an ISIN from the account watchlist (mutating, login required)."""
         isin = self._normalize_isin(ticker)
         self._guard_write_backoff("remove_from_watchlist")
-        result = await self._query_auth(
-            self._api.remove_from_watchlist(isin), mutating=True
-        )
+        result = await self._query_auth(lambda: self._api.remove_from_watchlist(isin), mutating=True)
         present = await self._verify_watchlist_membership(isin)
         if present is False:
             self._last_uncertain_write_at = None
@@ -899,7 +1009,7 @@ class TradeRepublicClient:
         """Best-effort instrument name for confirmation prompts."""
         isin = self._normalize_isin(ticker)
         try:
-            data = await self._query_public(self._api.instrument(isin))
+            data = await self._query_public(lambda: self._api.instrument(isin))
             if isinstance(data, dict):
                 return data.get("name") or data.get("shortName")
         except TradeRepublicClientError:
@@ -940,7 +1050,7 @@ class TradeRepublicClient:
     ) -> dict[str, Any]:
         """Recent account transactions from timeline (login required)."""
         self._validate_limit(limit)
-        raw = await self._query_auth(self._api.timeline_transactions(after=after))
+        raw = await self._query_auth(lambda: self._api.timeline_transactions(after=after))
         items = self._extract_timeline_items(raw)
         return {
             "after": after,
@@ -956,7 +1066,7 @@ class TradeRepublicClient:
     ) -> dict[str, Any]:
         """Full account timeline (broader than cash-relevant transactions)."""
         self._validate_limit(limit)
-        raw = await self._query_auth(self._api.timeline(after=after))
+        raw = await self._query_auth(lambda: self._api.timeline(after=after))
         items = self._extract_timeline_items(raw)
         next_cursor = None
         if isinstance(raw, dict):
@@ -980,12 +1090,12 @@ class TradeRepublicClient:
                 retryable=False,
                 kind=ErrorKind.CONFIG,
             )
-        detail = await self._query_auth(self._api.timeline_detail_v2(cleaned))
+        detail = await self._query_auth(lambda: self._api.timeline_detail_v2(cleaned))
         return {"event_id": cleaned, "detail": detail}
 
     async def list_open_orders(self, *, include_terminated: bool = False) -> dict[str, Any]:
         """Open (or optionally terminated) orders for the account."""
-        raw = await self._query_auth(self._api.orders(terminated=include_terminated))
+        raw = await self._query_auth(lambda: self._api.orders(terminated=include_terminated))
         orders = self._extract_list(raw, "orders", "data", "items")
         return {
             "include_terminated": include_terminated,
@@ -995,13 +1105,13 @@ class TradeRepublicClient:
 
     async def list_savings_plans(self) -> dict[str, Any]:
         """Active savings plans for the account."""
-        raw = await self._query_auth(self._api.savings_plans())
+        raw = await self._query_auth(lambda: self._api.savings_plans())
         plans = self._extract_list(raw, "savingsPlans", "plans", "data", "items")
         return {"count": len(plans), "savings_plans": plans}
 
     async def list_price_alarms(self) -> dict[str, Any]:
         """Active price alarms for the account."""
-        raw = await self._query_auth(self._api.price_alarms())
+        raw = await self._query_auth(lambda: self._api.price_alarms())
         alarms = self._extract_list(raw, "priceAlarms", "alarms", "data", "items")
         return {"count": len(alarms), "price_alarms": alarms}
 
@@ -1026,7 +1136,7 @@ class TradeRepublicClient:
         """One-shot live quote snapshot from the ticker stream (no login required)."""
         isin = self._normalize_isin(ticker)
         exchange = self._validate_exchange(exchange)
-        quote = await self._query_public(self._api.ticker(isin, exchange=exchange))
+        quote = await self._query_public(lambda: self._api.ticker(isin, exchange=exchange))
         return {"ticker": isin, "exchange": exchange, "quote": quote}
 
     async def get_derivatives(
@@ -1043,7 +1153,7 @@ class TradeRepublicClient:
                 retryable=False,
                 kind=ErrorKind.CONFIG,
             )
-        raw = await self._query_auth(self._api.derivatives(isin, category))
+        raw = await self._query_auth(lambda: self._api.derivatives(isin, category))
         items = self._extract_list(raw, "derivatives", "instruments", "data", "items", "results")
         return {
             "ticker": isin,
@@ -1055,7 +1165,7 @@ class TradeRepublicClient:
     async def get_instrument_suitability(self, ticker: str) -> dict[str, Any]:
         """Suitability / compliance info for an instrument (pre-trade)."""
         isin = self._normalize_isin(ticker)
-        suitability = await self._query_auth(self._api.instrument_suitability(isin))
+        suitability = await self._query_auth(lambda: self._api.instrument_suitability(isin))
         return {"ticker": isin, "suitability": suitability}
 
     async def get_order_preview(
@@ -1074,10 +1184,8 @@ class TradeRepublicClient:
                 retryable=False,
                 kind=ErrorKind.CONFIG,
             )
-        price = await self._query_auth(
-            self._api.price_for_order(isin, exchange=exchange, order_type=side)
-        )
-        size = await self._query_auth(self._api.available_size(isin, exchange=exchange))
+        price = await self._query_auth(lambda: self._api.price_for_order(isin, exchange=exchange, order_type=side))
+        size = await self._query_auth(lambda: self._api.available_size(isin, exchange=exchange))
         return {
             "ticker": isin,
             "exchange": exchange,
@@ -1088,10 +1196,10 @@ class TradeRepublicClient:
 
     async def get_account_settings(self) -> dict[str, Any]:
         """Account settings for the logged-in user."""
-        settings = await self._query_auth(self._api.settings())
+        settings = await self._query_auth(lambda: self._api.settings())
         return {"settings": settings}
 
     async def get_account_pairs(self) -> dict[str, Any]:
         """Securities/cash account numbers including tax wrappers."""
-        pairs = await self._query_auth(self._api.account_pairs())
+        pairs = await self._query_auth(lambda: self._api.account_pairs())
         return {"account_pairs": pairs}
