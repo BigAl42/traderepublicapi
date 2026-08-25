@@ -30,6 +30,7 @@ After config change or image update:
 ```bash
 TR_MCP_ALLOW_INTERACTIVE_LOGIN=0
 TR_MCP_WRITE_ENABLED=0
+TR_MCP_AUTO_RENEW=1               # soft cookie/token renew on 401 (default on)
 TR_TOKEN=...                      # or warm TR_COOKIES_FILE via check_login.py
 # Optional: pin cookie/circuit/confirm files when Hermes cwd varies
 # TR_ADAPTER_DATA_DIR=/opt/data/home/traderepublicapi/tr-adapter
@@ -88,6 +89,18 @@ Paste or adapt into the Hermes agent system prompt.
 2. Call `get_adapter_status` before retrying anything else.
 3. **Never** trigger push login from the agent when
    `TR_MCP_ALLOW_INTERACTIVE_LOGIN=0` (production default).
+4. **Never** switch to ClawStreet / other providers for TR account or portfolio
+   tools. The adapter auto-renews cold sessions (`TR_MCP_AUTO_RENEW=1`); if renew
+   fails, wait for offline `check_login.py` / fresh `TR_TOKEN`, then retry the
+   **same** MCP tool once.
+
+### When `code` is `login_required` or `session_expired`
+
+- The adapter already attempted cookie/token renew.
+- Call `get_adapter_status` (check `auto_renew`, `last_renew_result`).
+- Retry the same tool once after a short wait if `retryable` is true.
+- If still cold: ask the operator to run `check_login.py` offline — do not invent
+  alternative data sources for depot/cash/orders.
 
 ### When `code` is `rate_limited` or status is `cooldown`
 

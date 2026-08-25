@@ -92,6 +92,32 @@ class TRApi:
 
         self.latest_response = {}
 
+    def load_cookies_from_disk(self) -> bool:
+        """Reload Mozilla cookie jar from disk (e.g. after offline check_login)."""
+        if not self.cookies_file.is_file():
+            return False
+        jar = MozillaCookieJar(str(self.cookies_file))
+        try:
+            jar.load(ignore_discard=True, ignore_expires=True)
+        except (OSError, ValueError):
+            return False
+        self.session.cookies = jar
+        cookie = next(
+            (c.value for c in self.session.cookies if c.name == "tr_session"),
+            None,
+        )
+        if cookie:
+            self.sessionToken = cookie
+            return True
+        return False
+
+    def session_needs_refresh(self, *, skew_seconds: float = 45.0) -> bool:
+        """True when a soft web-session refresh should run before the next query."""
+        expires = float(getattr(self, "_session_expires_at", 0) or 0)
+        if expires <= 0:
+            return False
+        return time.time() >= (expires - skew_seconds)
+
     def _stable_device_id(self):
         seed = "|".join(
             [str(uuid.getnode()), platform.node(), platform.machine(), platform.system()]
