@@ -185,7 +185,7 @@ async def run_live_smoke() -> None:
 
     print("[live] get_balance_info …")
     try:
-        client._ensure_session()
+        await client._ensure_session()
         summary = await client.get_balance_info()
         cash = (summary.get("summary") or {}).get("total_cash")
         print(f"[live] get_balance_info OK — cash={cash}")
