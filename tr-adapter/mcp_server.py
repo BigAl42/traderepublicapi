@@ -160,6 +160,26 @@ class OpenOrdersInput(BaseModel):
         default=False,
         description="When true, include filled/cancelled orders; default is open only",
     )
+    ticker: str | None = Field(
+        default=None,
+        description="Optional ISIN filter, e.g. US0378331005",
+    )
+
+
+class OrderHistoryInput(BaseModel):
+    """Parameters for terminated / filled order history."""
+
+    ticker: str | None = Field(
+        default=None,
+        description="Optional ISIN filter, e.g. US0378331005",
+    )
+    limit: int = Field(default=50, ge=1, le=100, description="Max orders to return")
+
+
+class OrderIdInput(BaseModel):
+    """Parameters for a single order lookup."""
+
+    order_id: str = Field(..., min_length=1, max_length=200, description="Trade Republic order id")
 
 
 class LiveQuoteInput(BaseModel):
@@ -634,21 +654,78 @@ async def get_transaction_detail(event_id: str) -> dict:
 
 @mcp.tool()
 @log_tool_call("list_open_orders")
-async def list_open_orders(include_terminated: bool = False) -> dict:
-    """List orders for the logged-in account.
+async def list_open_orders(
+    include_terminated: bool = False,
+    ticker: str | None = None,
+) -> dict:
+    """List currently placed (open) orders for the logged-in account.
 
-    By default returns open orders only. Set include_terminated=true for
-    filled/cancelled history. Does not create or cancel orders. Requires login.
-    Read-only.
+    Returns normalized fields (order_id, ticker, side, status, size, limit, …)
+    plus raw Trade Republic payload. Optionally filter by ISIN. Set
+    include_terminated=true to also include filled/cancelled history — or use
+    list_order_history. Does not create or cancel orders. Requires login.
 
     Args:
         include_terminated: Include terminated orders when true.
+        ticker: Optional ISIN filter.
     """
     try:
-        validated = OpenOrdersInput(include_terminated=include_terminated)
+        validated = OpenOrdersInput(
+            include_terminated=include_terminated,
+            ticker=ticker,
+        )
+        ticker_arg = validated.ticker
+        if ticker_arg:
+            ticker_arg = _normalize_ticker(ticker_arg)
         return await get_client().list_open_orders(
             include_terminated=validated.include_terminated,
+            ticker=ticker_arg,
         )
+    except Exception as exc:
+        raise_structured(exc)
+
+
+@mcp.tool()
+@log_tool_call("list_order_history")
+async def list_order_history(
+    ticker: str | None = None,
+    limit: int = 50,
+) -> dict:
+    """List filled / cancelled / terminated orders (order history).
+
+    Read-only. Requires login. Prefer list_open_orders for currently active
+    working orders.
+
+    Args:
+        ticker: Optional ISIN filter.
+        limit: Max number of orders (1–100).
+    """
+    try:
+        validated = OrderHistoryInput(ticker=ticker, limit=limit)
+        ticker_arg = validated.ticker
+        if ticker_arg:
+            ticker_arg = _normalize_ticker(ticker_arg)
+        return await get_client().list_order_history(
+            ticker=ticker_arg,
+            limit=validated.limit,
+        )
+    except Exception as exc:
+        raise_structured(exc)
+
+
+@mcp.tool()
+@log_tool_call("get_order")
+async def get_order(order_id: str) -> dict:
+    """Get one order by id (open or history) plus optional timeline detail.
+
+    Read-only. Requires login. Does not cancel or modify the order.
+
+    Args:
+        order_id: Trade Republic order id from list_open_orders / list_order_history.
+    """
+    try:
+        validated = OrderIdInput(order_id=order_id)
+        return await get_client().get_order(validated.order_id)
     except Exception as exc:
         raise_structured(exc)
 
