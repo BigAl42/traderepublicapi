@@ -1272,6 +1272,140 @@ class TradeRepublicClient:
         return []
 
     @classmethod
+    def _extract_orders(cls, payload: Any) -> list[Any]:
+        """Pull order objects from the various TR ``orders`` response shapes."""
+        if isinstance(payload, list):
+            return [o for o in payload if isinstance(o, dict)]
+        if not isinstance(payload, dict):
+            return []
+
+        for key in ("orders", "openOrders", "activeOrders"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return [o for o in value if isinstance(o, dict)]
+
+        collected: list[Any] = []
+        for key, value in payload.items():
+            if key in {"cursors", "meta", "type"}:
+                continue
+            if isinstance(value, list) and value and all(isinstance(x, dict) for x in value):
+                sample = value[0]
+                if any(
+                    k in sample
+                    for k in (
+                        "id",
+                        "orderId",
+                        "isin",
+                        "instrumentId",
+                        "instrument",
+                        "type",
+                        "side",
+                        "status",
+                        "state",
+                    )
+                ):
+                    collected.extend(value)
+            elif isinstance(value, dict):
+                nested = cls._extract_orders(value)
+                if nested:
+                    collected.extend(nested)
+
+        if collected:
+            seen: set[str] = set()
+            unique: list[Any] = []
+            for order in collected:
+                oid = str(
+                    order.get("id")
+                    or order.get("orderId")
+                    or order.get("clientProcessId")
+                    or ""
+                )
+                if oid and oid in seen:
+                    continue
+                if oid:
+                    seen.add(oid)
+                unique.append(order)
+            return unique
+
+        # Last resort: generic list containers.
+        return [
+            o
+            for o in cls._extract_list(payload, "data", "items", "results")
+            if isinstance(o, dict)
+        ]
+
+    @classmethod
+    def _normalize_order(cls, order: dict[str, Any]) -> dict[str, Any]:
+        """Stable summary fields for Hermes plus the raw TR payload."""
+        instrument = order.get("instrument")
+        instrument_id = None
+        name = None
+        if isinstance(instrument, dict):
+            instrument_id = instrument.get("isin") or instrument.get("id")
+            name = instrument.get("name") or instrument.get("shortName")
+        elif isinstance(instrument, str):
+            instrument_id = instrument
+
+        isin = (
+            order.get("isin")
+            or order.get("instrumentId")
+            or instrument_id
+            or order.get("underlyingIsin")
+        )
+        if isinstance(isin, str):
+            isin = isin.strip().upper() or None
+
+        order_id = (
+            order.get("id")
+            or order.get("orderId")
+            or order.get("clientProcessId")
+            or order.get("order_id")
+        )
+        side = order.get("side") or order.get("type") or order.get("orderType")
+        if isinstance(side, str):
+            side = side.strip().lower()
+
+        return {
+            "order_id": order_id,
+            "ticker": isin,
+            "name": name or order.get("name") or order.get("instrumentName"),
+            "side": side,
+            "status": order.get("status") or order.get("state") or order.get("orderStatus"),
+            "size": order.get("size")
+            or order.get("netSize")
+            or order.get("quantity")
+            or order.get("amount"),
+            "limit": order.get("limit") or order.get("limitPrice"),
+            "stop": order.get("stop") or order.get("stopPrice"),
+            "exchange": order.get("exchange")
+            or order.get("exchangeId")
+            or order.get("venue"),
+            "created_at": order.get("createdAt")
+            or order.get("created_at")
+            or order.get("timestamp")
+            or order.get("created"),
+            "expiry": order.get("expiry") or order.get("expirationDate") or order.get("validUntil"),
+            "raw": order,
+        }
+
+    @classmethod
+    def _filter_orders_by_ticker(
+        cls, orders: list[dict[str, Any]], ticker: str | None
+    ) -> list[dict[str, Any]]:
+        if not ticker:
+            return orders
+        needle = ticker.strip().upper()
+        if not needle:
+            return orders
+        filtered: list[dict[str, Any]] = []
+        for order in orders:
+            summary = cls._normalize_order(order) if "raw" not in order else order
+            candidate = summary.get("ticker") or ""
+            if candidate == needle or needle in str(candidate):
+                filtered.append(order)
+        return filtered
+
+    @classmethod
     def _extract_timeline_items(cls, payload: Any) -> list[Any]:
         return cls._extract_list(payload, "events", "timeline", "data", "items", "results")
 
@@ -1333,14 +1467,97 @@ class TradeRepublicClient:
         detail = await self._query_auth(lambda: self._api.timeline_detail_v2(cleaned))
         return {"event_id": cleaned, "detail": detail}
 
-    async def list_open_orders(self, *, include_terminated: bool = False) -> dict[str, Any]:
+    async def list_open_orders(
+        self,
+        *,
+        include_terminated: bool = False,
+        ticker: str | None = None,
+    ) -> dict[str, Any]:
         """Open (or optionally terminated) orders for the account."""
         raw = await self._query_auth(lambda: self._api.orders(terminated=include_terminated))
-        orders = self._extract_list(raw, "orders", "data", "items")
+        orders = self._extract_orders(raw)
+        if ticker:
+            isin = self._normalize_isin(ticker)
+            orders = self._filter_orders_by_ticker(orders, isin)
+        else:
+            isin = None
+        summaries = [self._normalize_order(o) for o in orders if isinstance(o, dict)]
         return {
             "include_terminated": include_terminated,
-            "count": len(orders),
-            "orders": orders,
+            "ticker": isin,
+            "count": len(summaries),
+            "orders": summaries,
+        }
+
+    async def list_order_history(
+        self,
+        *,
+        ticker: str | None = None,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """Filled / cancelled / otherwise terminated orders (read-only)."""
+        self._validate_limit(limit)
+        raw = await self._query_auth(lambda: self._api.orders(terminated=True))
+        orders = self._extract_orders(raw)
+        if ticker:
+            isin = self._normalize_isin(ticker)
+            orders = self._filter_orders_by_ticker(orders, isin)
+        else:
+            isin = None
+        summaries = [self._normalize_order(o) for o in orders if isinstance(o, dict)]
+        return {
+            "ticker": isin,
+            "limit": limit,
+            "count": min(len(summaries), limit),
+            "orders": summaries[:limit],
+        }
+
+    async def get_order(self, order_id: str) -> dict[str, Any]:
+        """Fetch one order by id from open + terminated lists; enrich with timeline detail."""
+        cleaned = (order_id or "").strip()
+        if not cleaned:
+            raise TradeRepublicClientError(
+                "order_id must not be empty",
+                retryable=False,
+                kind=ErrorKind.CONFIG,
+            )
+
+        matched: dict[str, Any] | None = None
+        source = None
+        for terminated, label in ((False, "open"), (True, "history")):
+            raw = await self._query_auth(lambda t=terminated: self._api.orders(terminated=t))
+            for order in self._extract_orders(raw):
+                if not isinstance(order, dict):
+                    continue
+                summary = self._normalize_order(order)
+                oid = str(summary.get("order_id") or "")
+                if oid == cleaned:
+                    matched = summary
+                    source = label
+                    break
+            if matched is not None:
+                break
+
+        detail = None
+        try:
+            detail = await self._query_auth(
+                lambda: self._api.timeline_detail_order(cleaned)
+            )
+        except TradeRepublicClientError:
+            detail = None
+
+        if matched is None and detail is None:
+            raise TradeRepublicClientError(
+                f"Order {cleaned!r} not found in open or terminated orders.",
+                retryable=False,
+                kind=ErrorKind.CONFIG,
+            )
+
+        return {
+            "order_id": cleaned,
+            "found_in": source,
+            "order": matched,
+            "detail": detail,
         }
 
     async def list_savings_plans(self) -> dict[str, Any]:

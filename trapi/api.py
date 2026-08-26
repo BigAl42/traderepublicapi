@@ -1211,6 +1211,15 @@ class TRApi:
             key=f"timelineDetailV2 {id}",
         )
 
+    async def timeline_detail_order(self, order_id, callback=print):
+        """timelineDetail request keyed by orderId (order ticket / execution detail)."""
+        return await self.sub(
+            "timelineDetail",
+            callback=callback,
+            payload={"type": "timelineDetail", "orderId": order_id},
+            key=f"timelineDetail order {order_id}",
+        )
+
     async def subscribe_news(self, isin, callback=print):
         """subscribeNews request"""
         return await self.sub(
@@ -1490,8 +1499,11 @@ class TrBlockingApi(TRApi):
     def neon_search_tags(self):
         return self._run(super().neon_search_tags())
 
-    def orders(self):
-        return self._run(super().orders())
+    def orders(self, terminated=False):
+        return self._run(super().orders(terminated=terminated))
+
+    def timeline_detail_order(self, order_id):
+        return self._run(super().timeline_detail_order(order_id))
 
     def portfolio(self):
         return self._run(super().portfolio())

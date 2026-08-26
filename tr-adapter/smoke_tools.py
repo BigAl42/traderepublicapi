@@ -36,6 +36,8 @@ EXPECTED_MCP_TOOLS: frozenset[str] = frozenset(
         "get_full_timeline",
         "get_transaction_detail",
         "list_open_orders",
+        "list_order_history",
+        "get_order",
         "list_savings_plans",
         "list_price_alarms",
         "get_live_quote",
