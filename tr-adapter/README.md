@@ -17,8 +17,9 @@ TR_MCP_AUTO_RENEW=1   # default: soft cookie/token renew on 401 / near-expiry
 ```
 
 On cold/401 sessions the adapter soft-renews itself (disk cookies → `TR_TOKEN`).
-If cookies are fully dead, call MCP tool `renew_session` (app push with
-`TR_PHONE`/`TR_PIN`) — agents must **not** switch to other market-data providers.
+If cookies are fully dead, authenticated MCP tools start an app push automatically
+(when `TR_PHONE`/`TR_PIN` are set) — agents retry the **same tool** after the user
+confirms. Agents must **not** switch to other market-data providers.
 Offline alternative:
 
 ```bash

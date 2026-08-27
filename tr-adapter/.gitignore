@@ -3,6 +3,7 @@ tr_cookies.txt
 *.cookies.txt
 *.auth_circuit.json
 *.auth_circuit.json.lock
+*.login_process.json
 *.confirmations.json
 __pycache__/
 *.pyc
