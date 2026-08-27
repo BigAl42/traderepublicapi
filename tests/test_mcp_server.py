@@ -136,6 +136,8 @@ def _mock_client() -> MagicMock:
     )
     mock.add_to_watchlist = AsyncMock(return_value={"status": "completed", "ticker": "US0378331005"})
     mock.remove_from_watchlist = AsyncMock(return_value={"status": "completed", "ticker": "US0378331005"})
+    mock.place_limit_order = AsyncMock(return_value={"status": "completed", "ticker": "US0378331005"})
+    mock.cancel_order = AsyncMock(return_value={"status": "completed", "order_id": "ord-1"})
     return mock
 
 
@@ -290,6 +292,25 @@ class RootMcpServerTest(unittest.IsolatedAsyncioTestCase):
                 )
         self.assertIn("confirm_token", str(ctx.exception).lower())
         mock.add_to_watchlist.assert_not_called()
+
+    async def test_place_limit_order_trading_disabled(self):
+        from unittest.mock import patch
+
+        mock = _mock_client()
+        mcp_server = _patch_client(mock)
+        with patch.dict(os.environ, {"TR_MCP_TRADING_ENABLED": ""}, clear=False):
+            with self.assertRaises(Exception) as ctx:
+                await mcp_server.mcp.call_tool(
+                    "place_limit_order",
+                    {
+                        "ticker": "US0378331005",
+                        "order_type": "buy",
+                        "size": 1,
+                        "limit": 100,
+                    },
+                )
+        self.assertIn("trading_disabled", str(ctx.exception))
+        mock.place_limit_order.assert_not_called()
 
     def test_ticker_validation(self):
         mcp_server = _fresh_import_mcp_server()

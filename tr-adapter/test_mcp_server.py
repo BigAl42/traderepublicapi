@@ -182,6 +182,24 @@ def _mock_client() -> MagicMock:
         "action": "remove_from_watchlist",
         "ticker": "US0378331005",
     })
+    mock.place_limit_order = AsyncMock(return_value={
+        "status": "completed",
+        "action": "place_limit_order",
+        "ticker": "US0378331005",
+        "verified": True,
+    })
+    mock.place_stop_market_order = AsyncMock(return_value={
+        "status": "completed",
+        "action": "place_stop_market_order",
+        "ticker": "US0378331005",
+        "verified": True,
+    })
+    mock.cancel_order = AsyncMock(return_value={
+        "status": "completed",
+        "action": "cancel_order",
+        "order_id": "ord-1",
+        "verified": True,
+    })
     return mock
 
 
@@ -619,6 +637,168 @@ class WatchlistWriteTest(unittest.IsolatedAsyncioTestCase):
                     },
                 )
         mock.remove_from_watchlist.assert_awaited_once_with("US0378331005")
+
+
+class TradingToolsTest(unittest.IsolatedAsyncioTestCase):
+    def _tool_text(self, result) -> str:
+        if isinstance(result, tuple):
+            content = result[0]
+        else:
+            content = getattr(result, "content", result)
+        if isinstance(content, list) and content:
+            first = content[0]
+            return getattr(first, "text", str(first))
+        return str(content)
+
+    async def test_place_limit_disabled(self):
+        mock = _mock_client()
+        mcp_server = _patch_client(mock)
+        with patch.dict(os.environ, {"TR_MCP_TRADING_ENABLED": ""}, clear=False):
+            with self.assertRaises(Exception) as ctx:
+                await mcp_server.mcp.call_tool(
+                    "place_limit_order",
+                    {
+                        "ticker": "US0378331005",
+                        "order_type": "buy",
+                        "size": 1,
+                        "limit": 150,
+                    },
+                )
+        self.assertIn("trading_disabled", str(ctx.exception))
+        mock.place_limit_order.assert_not_called()
+
+    async def test_place_limit_requires_confirmation(self):
+        mock = _mock_client()
+        mcp_server = _patch_client(mock)
+        with patch.dict(os.environ, {"TR_MCP_TRADING_ENABLED": "1"}):
+            result = await mcp_server.mcp.call_tool(
+                "place_limit_order",
+                {
+                    "ticker": "US0378331005",
+                    "order_type": "buy",
+                    "size": 1,
+                    "limit": 150.0,
+                    "confirmed": False,
+                },
+            )
+        mock.place_limit_order.assert_not_called()
+        text = self._tool_text(result)
+        self.assertIn("confirmation_required", text)
+        self.assertIn("confirm_token", text)
+        self.assertIn("ECHTES GELD", text)
+
+    async def test_place_limit_executes_after_confirmation(self):
+        import json
+        import tempfile
+        from pathlib import Path
+
+        mock = _mock_client()
+        mcp_server = _patch_client(mock)
+        with tempfile.TemporaryDirectory() as tmp:
+            store = str(Path(tmp) / "confirm.json")
+            with patch.dict(
+                os.environ,
+                {"TR_MCP_TRADING_ENABLED": "1", "TR_MCP_CONFIRM_STORE": store},
+            ):
+                import mcp_write as mw
+
+                mw._STORE = mw.ConfirmationStore(Path(store))
+                preview = await mcp_server.mcp.call_tool(
+                    "place_limit_order",
+                    {
+                        "ticker": "US0378331005",
+                        "order_type": "buy",
+                        "size": 1,
+                        "limit": 150.0,
+                        "confirmed": False,
+                    },
+                )
+                token = json.loads(self._tool_text(preview))["confirm_token"]
+                await mcp_server.mcp.call_tool(
+                    "place_limit_order",
+                    {
+                        "ticker": "US0378331005",
+                        "order_type": "buy",
+                        "size": 1,
+                        "limit": 150.0,
+                        "confirmed": True,
+                        "confirm_token": token,
+                    },
+                )
+        mock.place_limit_order.assert_awaited_once()
+
+    async def test_place_limit_rejects_param_change(self):
+        import json
+        import tempfile
+        from pathlib import Path
+
+        mock = _mock_client()
+        mcp_server = _patch_client(mock)
+        with tempfile.TemporaryDirectory() as tmp:
+            store = str(Path(tmp) / "confirm.json")
+            with patch.dict(
+                os.environ,
+                {"TR_MCP_TRADING_ENABLED": "1", "TR_MCP_CONFIRM_STORE": store},
+            ):
+                import mcp_write as mw
+
+                mw._STORE = mw.ConfirmationStore(Path(store))
+                preview = await mcp_server.mcp.call_tool(
+                    "place_limit_order",
+                    {
+                        "ticker": "US0378331005",
+                        "order_type": "buy",
+                        "size": 1,
+                        "limit": 150.0,
+                        "confirmed": False,
+                    },
+                )
+                token = json.loads(self._tool_text(preview))["confirm_token"]
+                with self.assertRaises(Exception) as ctx:
+                    await mcp_server.mcp.call_tool(
+                        "place_limit_order",
+                        {
+                            "ticker": "US0378331005",
+                            "order_type": "buy",
+                            "size": 2,
+                            "limit": 150.0,
+                            "confirmed": True,
+                            "confirm_token": token,
+                        },
+                    )
+        self.assertIn("confirmation_required_or_invalid", str(ctx.exception))
+        mock.place_limit_order.assert_not_called()
+
+    async def test_cancel_order_executes_after_confirmation(self):
+        import json
+        import tempfile
+        from pathlib import Path
+
+        mock = _mock_client()
+        mcp_server = _patch_client(mock)
+        with tempfile.TemporaryDirectory() as tmp:
+            store = str(Path(tmp) / "confirm.json")
+            with patch.dict(
+                os.environ,
+                {"TR_MCP_TRADING_ENABLED": "1", "TR_MCP_CONFIRM_STORE": store},
+            ):
+                import mcp_write as mw
+
+                mw._STORE = mw.ConfirmationStore(Path(store))
+                preview = await mcp_server.mcp.call_tool(
+                    "cancel_order",
+                    {"order_id": "ord-1", "confirmed": False},
+                )
+                token = json.loads(self._tool_text(preview))["confirm_token"]
+                await mcp_server.mcp.call_tool(
+                    "cancel_order",
+                    {
+                        "order_id": "ord-1",
+                        "confirmed": True,
+                        "confirm_token": token,
+                    },
+                )
+        mock.cancel_order.assert_awaited_once_with("ord-1")
 
 
 class McpWriteHelpersTest(unittest.TestCase):

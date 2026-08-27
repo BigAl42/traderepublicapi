@@ -580,6 +580,8 @@ class TRApi:
                          "LV", "PT", "SI", "SK"]
     expiry_list = ["gfd", "gtd", "gtc"]
     order_type_list = ["buy", "sell"]
+    order_mode_list = ["limit", "market", "stopMarket"]
+    _default_order_warnings = ["userExperience"]
 
     # todo accruedInterestTermsRequired
 
@@ -720,7 +722,8 @@ class TRApi:
         """accountPairs request — securities/cash account numbers including tax wrappers."""
         return await self.sub("accountPairs", callback)
 
-    # todo  confirmOrder
+    # confirmOrder is not required for simpleCreateOrder (same as pytr).
+    # changeOrder is not wrapped; amend by cancel_order + recreate.
 
     async def create_price_alarm(self, isin, target_price, callback=print):
         """createPriceAlarm request"""
@@ -1056,6 +1059,180 @@ class TRApi:
         """settings request"""
         return await self.sub("settings", callback)
 
+    def _build_simple_create_order_payload(
+            self,
+            *,
+            mode,
+            isin,
+            order_type,
+            size,
+            expiry,
+            exchange="LSX",
+            limit=None,
+            stop=None,
+            sell_fractions=None,
+            expiry_date=None,
+            order_id=None,
+            warnings_shown=None,
+    ):
+        """Build a simpleCreateOrder WS payload. Real money — no dry-run.
+
+        Modes: limit (requires limit), market (requires sell_fractions),
+        stopMarket (requires stop; use sell for stop-loss).
+        """
+        if mode not in self.order_mode_list:
+            raise TRapiException(f"mode must be either of {self.order_mode_list}")
+        if expiry not in self.expiry_list:
+            raise TRapiException(f"Expiry must be either of {self.expiry_list}")
+        if order_type not in self.order_type_list:
+            raise TRapiException(
+                f"order_Type must be either of {self.order_type_list}"
+            )
+        if exchange not in self.exchange_list:
+            raise TRapiException(f"exchange must be either one of {self.exchange_list}")
+        if expiry == "gtd" and not expiry_date:
+            raise TRapiException("expiry_date is required when expiry is 'gtd'")
+
+        if mode == "limit":
+            if limit is None:
+                raise TRapiException("limit is required for mode 'limit'")
+        elif mode == "market":
+            if sell_fractions is None:
+                raise TRapiException("sell_fractions is required for mode 'market'")
+        elif mode == "stopMarket":
+            if stop is None:
+                raise TRapiException("stop is required for mode 'stopMarket'")
+
+        warnings = (
+            list(warnings_shown)
+            if warnings_shown is not None
+            else list(self._default_order_warnings)
+        )
+        client_process_id = order_id if order_id else str(uuid.uuid4())
+
+        expiry_payload = {"type": expiry}
+        if expiry == "gtd":
+            expiry_payload["value"] = expiry_date
+
+        parameters = {
+            "instrumentId": isin,
+            "exchangeId": exchange,
+            "expiry": expiry_payload,
+            "mode": mode,
+            "size": size,
+            "type": order_type,
+        }
+        if mode == "limit":
+            parameters["limit"] = limit
+        elif mode == "market":
+            parameters["sellFractions"] = sell_fractions
+        elif mode == "stopMarket":
+            parameters["stop"] = stop
+
+        return {
+            "type": "simpleCreateOrder",
+            "clientProcessId": client_process_id,
+            "warningsShown": warnings,
+            "acceptedWarnings": list(warnings),
+            "parameters": parameters,
+        }
+
+    async def _simple_create_order_sub(self, payload, callback=print):
+        client_process_id = payload["clientProcessId"]
+        return await self.sub(
+            "simpleCreateOrder",
+            payload=payload,
+            callback=callback,
+            key=f"simpleCreateOrder {client_process_id}",
+        )
+
+    async def limit_order(
+            self,
+            isin,
+            order_type,
+            size,
+            limit,
+            expiry,
+            exchange="LSX",
+            expiry_date=None,
+            order_id=None,
+            warnings_shown=None,
+            callback=print,
+    ):
+        """Place a limit order via simpleCreateOrder. Real money — no dry-run."""
+        payload = self._build_simple_create_order_payload(
+            mode="limit",
+            isin=isin,
+            order_type=order_type,
+            size=size,
+            limit=limit,
+            expiry=expiry,
+            exchange=exchange,
+            expiry_date=expiry_date,
+            order_id=order_id,
+            warnings_shown=warnings_shown,
+        )
+        return await self._simple_create_order_sub(payload, callback=callback)
+
+    async def market_order(
+            self,
+            isin,
+            order_type,
+            size,
+            expiry,
+            sell_fractions,
+            exchange="LSX",
+            expiry_date=None,
+            order_id=None,
+            warnings_shown=None,
+            callback=print,
+    ):
+        """Place a market order via simpleCreateOrder. Real money — no dry-run."""
+        payload = self._build_simple_create_order_payload(
+            mode="market",
+            isin=isin,
+            order_type=order_type,
+            size=size,
+            sell_fractions=sell_fractions,
+            expiry=expiry,
+            exchange=exchange,
+            expiry_date=expiry_date,
+            order_id=order_id,
+            warnings_shown=warnings_shown,
+        )
+        return await self._simple_create_order_sub(payload, callback=callback)
+
+    async def stop_market_order(
+            self,
+            isin,
+            order_type,
+            size,
+            stop,
+            expiry,
+            exchange="LSX",
+            expiry_date=None,
+            order_id=None,
+            warnings_shown=None,
+            callback=print,
+    ):
+        """Place a stop-market order (stop-loss / stop-buy). Real money — no dry-run.
+
+        Amend by cancel_order + recreate; changeOrder is not wrapped.
+        """
+        payload = self._build_simple_create_order_payload(
+            mode="stopMarket",
+            isin=isin,
+            order_type=order_type,
+            size=size,
+            stop=stop,
+            expiry=expiry,
+            exchange=exchange,
+            expiry_date=expiry_date,
+            order_id=order_id,
+            warnings_shown=warnings_shown,
+        )
+        return await self._simple_create_order_sub(payload, callback=callback)
+
     async def simple_create_order(
             self,
             order_id,
@@ -1065,41 +1242,22 @@ class TRApi:
             limit,
             expiry,
             exchange="LSX",
+            expiry_date=None,
+            warnings_shown=None,
             callback=print,
     ):
-        """simpleCreateOrder request"""
-        if expiry not in self.expiry_list:
-            raise TRapiException(f"Expiry must be either of {self.expiry_list}")
-
-        if order_type not in self.order_type_list:
-            raise TRapiException(
-                f"order_Type must be either of {self.order_type_list}"
-            )
-
-        if exchange not in self.exchange_list:
-            raise TRapiException(f"exchange must be either one of {self.exchange_list}")
-
-        payload = {
-            "type": "simpleCreateOrder",
-            "clientProcessId": order_id,
-            "warningsShown": ["userExperience"],
-            "acceptedWarnings": ["userExperience"],
-            "parameters": {
-                "instrumentId": isin,
-                "exchangeId": exchange,
-                "expiry": {"type": expiry},
-                "limit": limit,
-                "mode": "limit",
-                "size": size,
-                "type": order_type,
-            },
-        }
-
-        return await self.sub(
-            "simpleCreateOrder",
-            payload=payload,
+        """Limit order via simpleCreateOrder (backcompat). Prefer limit_order."""
+        return await self.limit_order(
+            isin,
+            order_type,
+            size,
+            limit,
+            expiry,
+            exchange=exchange,
+            expiry_date=expiry_date,
+            order_id=order_id,
+            warnings_shown=warnings_shown,
             callback=callback,
-            key=f"simpleCreateOrder {order_id}",
         )
 
     async def stock_detail_dividends(self, isin, callback=print):
@@ -1278,21 +1436,6 @@ class TRApi:
     @deprecated(reason="Use function cancel_order")
     async def order_cancel(self, id, callback=print):
         await self.cancel_order(id, callback=callback)
-
-    @deprecated(reason="Use function simple_create_order")
-    async def limit_order(
-            self,
-            order_id,
-            isin,
-            order_type,
-            size,
-            limit,
-            expiry,
-            exchange="LSX",
-            callback=print,
-    ):
-        await self.simple_create_order(order_id, isin, order_type, size, limit, expiry, exchange=exchange,
-                                       callback=callback)
 
     @deprecated(reason="Use function aggregate_history_light")
     async def stock_history(self, isin, range="max", callback=print):

@@ -596,7 +596,7 @@ class TradeRepublicClient:
 
     def get_adapter_status(self) -> dict[str, Any]:
         """Local adapter health — no Trade Republic network call."""
-        from mcp_write import write_enabled
+        from mcp_write import trading_enabled, write_enabled
 
         cookies_path = Path(self._api.cookies_file)
         cooldown = self._circuit.remaining_cooldown_seconds()
@@ -618,9 +618,9 @@ class TradeRepublicClient:
             overall = "cooldown"
         elif uncertain_remaining > 0:
             guidance = (
-                "Last watchlist write was unverified. Wait "
+                "Last mutation was unverified. Wait "
                 f"{uncertain_remaining}s before another mutation; "
-                "prefer get_watchlist to check state."
+                "prefer get_watchlist / list_open_orders to check state."
             )
             overall = "write_backoff"
         elif self._session_ready:
@@ -658,6 +658,7 @@ class TradeRepublicClient:
             "login_process_id": self._login_process_id or getattr(self._api, "_process_id", None),
             "session_expires_at": getattr(self._api, "_session_expires_at", None) or None,
             "write_enabled": write_enabled(),
+            "trading_enabled": trading_enabled(),
             "auth_circuit_open": cooldown > 0,
             "auth_cooldown_remaining_seconds": cooldown,
             "retry_after_seconds": max(cooldown, uncertain_remaining) or None,
@@ -669,10 +670,19 @@ class TradeRepublicClient:
     def _note_uncertain_write(self, action: str) -> dict[str, Any]:
         self._last_uncertain_write_at = time.monotonic()
         self._last_uncertain_write_action = action
+        check = (
+            "list_open_orders"
+            if action in {
+                "place_limit_order",
+                "place_stop_market_order",
+                "cancel_order",
+            }
+            else "get_watchlist"
+        )
         return {
             "retry_after_seconds": self._write_verify_backoff_sec,
             "guidance": (
-                f"Do not retry {action} immediately. Call get_watchlist and/or "
+                f"Do not retry {action} immediately. Call {check} and/or "
                 "get_adapter_status, wait at least retry_after_seconds, then decide. "
                 "Avoid login storms during cooldown."
             ),
@@ -688,7 +698,8 @@ class TradeRepublicClient:
         raise TradeRepublicClientError(
             (
                 f"Write backoff active after unverified '{self._last_uncertain_write_action}'. "
-                f"Wait ~{remaining}s before '{action}'. Check get_watchlist / get_adapter_status."
+                f"Wait ~{remaining}s before '{action}'. "
+                "Check get_watchlist / list_open_orders / get_adapter_status."
             ),
             retryable=True,
             kind=ErrorKind.SERVER,
@@ -1660,3 +1671,248 @@ class TradeRepublicClient:
         """Securities/cash account numbers including tax wrappers."""
         pairs = await self._query_auth(lambda: self._api.account_pairs())
         return {"account_pairs": pairs}
+
+    EXPIRIES = TRApi.expiry_list
+
+    def _validate_order_side(self, order_type: str) -> str:
+        side = (order_type or "").strip().lower()
+        if side not in self.ORDER_TYPES:
+            raise TradeRepublicClientError(
+                f"order_type must be one of {self.ORDER_TYPES}",
+                retryable=False,
+                kind=ErrorKind.CONFIG,
+            )
+        return side
+
+    def _validate_expiry(self, expiry: str, expiry_date: str | None) -> tuple[str, str | None]:
+        cleaned = (expiry or "").strip().lower()
+        if cleaned not in self.EXPIRIES:
+            raise TradeRepublicClientError(
+                f"expiry must be one of {self.EXPIRIES}",
+                retryable=False,
+                kind=ErrorKind.CONFIG,
+            )
+        date = (expiry_date or "").strip() or None
+        if cleaned == "gtd" and not date:
+            raise TradeRepublicClientError(
+                "expiry_date is required when expiry is 'gtd'",
+                retryable=False,
+                kind=ErrorKind.CONFIG,
+            )
+        return cleaned, date
+
+    @staticmethod
+    def _validate_positive(name: str, value: float | int) -> float:
+        try:
+            number = float(value)
+        except (TypeError, ValueError) as exc:
+            raise TradeRepublicClientError(
+                f"{name} must be a number",
+                retryable=False,
+                kind=ErrorKind.CONFIG,
+            ) from exc
+        if number <= 0:
+            raise TradeRepublicClientError(
+                f"{name} must be > 0",
+                retryable=False,
+                kind=ErrorKind.CONFIG,
+            )
+        return number
+
+    @staticmethod
+    def _order_id_of(order: Any) -> str | None:
+        if not isinstance(order, dict):
+            return None
+        for key in ("id", "orderId", "order_id"):
+            value = order.get(key)
+            if value:
+                return str(value)
+        return None
+
+    @staticmethod
+    def _order_isin_of(order: Any) -> str | None:
+        if not isinstance(order, dict):
+            return None
+        for key in ("isin", "instrumentId", "instrument_id"):
+            value = order.get(key)
+            if value:
+                return str(value).upper()
+        params = order.get("parameters")
+        if isinstance(params, dict):
+            for key in ("instrumentId", "isin"):
+                value = params.get(key)
+                if value:
+                    return str(value).upper()
+        return None
+
+    async def _find_open_order(
+        self,
+        *,
+        isin: str | None = None,
+        order_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        listed = await self.list_open_orders(include_terminated=False)
+        for order in listed.get("orders") or []:
+            if order_id and self._order_id_of(order) == order_id:
+                return order if isinstance(order, dict) else {"id": order_id}
+            if isin and self._order_isin_of(order) == isin:
+                return order if isinstance(order, dict) else {"isin": isin}
+        return None
+
+    async def place_limit_order(
+        self,
+        ticker: str,
+        order_type: str,
+        size: float,
+        limit: float,
+        expiry: str = "gfd",
+        exchange: str = "LSX",
+        expiry_date: str | None = None,
+    ) -> dict[str, Any]:
+        """Place a limit order (real money). Caller must gate with trading confirm."""
+        isin = self._normalize_isin(ticker)
+        side = self._validate_order_side(order_type)
+        exchange = self._validate_exchange(exchange)
+        expiry, expiry_date = self._validate_expiry(expiry, expiry_date)
+        size_n = self._validate_positive("size", size)
+        limit_n = self._validate_positive("limit", limit)
+        self._guard_write_backoff("place_limit_order")
+        result = await self._query_auth(
+            self._api.limit_order(
+                isin,
+                side,
+                size_n,
+                limit_n,
+                expiry,
+                exchange=exchange,
+                expiry_date=expiry_date,
+            ),
+            mutating=True,
+        )
+        found = await self._find_open_order(isin=isin)
+        base = {
+            "action": "place_limit_order",
+            "ticker": isin,
+            "order_type": side,
+            "size": size_n,
+            "limit": limit_n,
+            "expiry": expiry,
+            "expiry_date": expiry_date,
+            "exchange": exchange,
+            "result": result,
+        }
+        if found is not None:
+            self._last_uncertain_write_at = None
+            self._last_uncertain_write_action = None
+            return {
+                "status": "completed",
+                "verified": True,
+                "order": found,
+                **base,
+            }
+        return {
+            "status": "uncertain",
+            "code": "order_verify_timeout",
+            "verified": None,
+            "message": "Limit order sent but not found in open orders yet",
+            **base,
+            **self._note_uncertain_write("place_limit_order"),
+        }
+
+    async def place_stop_market_order(
+        self,
+        ticker: str,
+        order_type: str,
+        size: float,
+        stop: float,
+        expiry: str = "gtc",
+        exchange: str = "LSX",
+        expiry_date: str | None = None,
+    ) -> dict[str, Any]:
+        """Place a stop-market order / stop-loss (real money)."""
+        isin = self._normalize_isin(ticker)
+        side = self._validate_order_side(order_type)
+        exchange = self._validate_exchange(exchange)
+        expiry, expiry_date = self._validate_expiry(expiry, expiry_date)
+        size_n = self._validate_positive("size", size)
+        stop_n = self._validate_positive("stop", stop)
+        self._guard_write_backoff("place_stop_market_order")
+        result = await self._query_auth(
+            self._api.stop_market_order(
+                isin,
+                side,
+                size_n,
+                stop_n,
+                expiry,
+                exchange=exchange,
+                expiry_date=expiry_date,
+            ),
+            mutating=True,
+        )
+        found = await self._find_open_order(isin=isin)
+        base = {
+            "action": "place_stop_market_order",
+            "ticker": isin,
+            "order_type": side,
+            "size": size_n,
+            "stop": stop_n,
+            "expiry": expiry,
+            "expiry_date": expiry_date,
+            "exchange": exchange,
+            "result": result,
+        }
+        if found is not None:
+            self._last_uncertain_write_at = None
+            self._last_uncertain_write_action = None
+            return {
+                "status": "completed",
+                "verified": True,
+                "order": found,
+                **base,
+            }
+        return {
+            "status": "uncertain",
+            "code": "order_verify_timeout",
+            "verified": None,
+            "message": "Stop-market order sent but not found in open orders yet",
+            **base,
+            **self._note_uncertain_write("place_stop_market_order"),
+        }
+
+    async def cancel_order(self, order_id: str) -> dict[str, Any]:
+        """Cancel an open order by id (real money)."""
+        cleaned = (order_id or "").strip()
+        if not cleaned:
+            raise TradeRepublicClientError(
+                "order_id is required",
+                retryable=False,
+                kind=ErrorKind.CONFIG,
+            )
+        self._guard_write_backoff("cancel_order")
+        result = await self._query_auth(
+            self._api.cancel_order(cleaned),
+            mutating=True,
+        )
+        still_open = await self._find_open_order(order_id=cleaned)
+        base = {
+            "action": "cancel_order",
+            "order_id": cleaned,
+            "result": result,
+        }
+        if still_open is None:
+            self._last_uncertain_write_at = None
+            self._last_uncertain_write_action = None
+            return {
+                "status": "completed",
+                "verified": True,
+                **base,
+            }
+        return {
+            "status": "uncertain",
+            "code": "order_cancel_verify_failed",
+            "verified": False,
+            "message": "Cancel sent but order still appears in open orders",
+            "order": still_open,
+            **base,
+            **self._note_uncertain_write("cancel_order"),
+        }

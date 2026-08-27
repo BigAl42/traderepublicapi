@@ -48,6 +48,9 @@ EXPECTED_MCP_TOOLS: frozenset[str] = frozenset(
         "get_account_pairs",
         "add_to_watchlist",
         "remove_from_watchlist",
+        "place_limit_order",
+        "place_stop_market_order",
+        "cancel_order",
     }
 )
 
@@ -60,6 +63,7 @@ def build_mock_client() -> MagicMock:
             "status": "cold",
             "session_ready": False,
             "write_enabled": False,
+            "trading_enabled": False,
             "auth_circuit_open": False,
             "retry_after_seconds": None,
             "guidance": "smoke test mock",

@@ -79,14 +79,24 @@ Example scripts download PDFs from timeline detail `documents` sections (`exampl
 | Method | Mutating |
 |--------|----------|
 | `watchlist`, `add_to_watchlist`, `remove_from_watchlist` | add/remove yes |
-| `orders`, `simple_create_order`, `cancel_order` | create/cancel **yes — real money** |
-| `price_for_order`, `available_size` | no |
+| `orders`, `price_for_order`, `available_size` | no |
+| `limit_order` | **yes — real money** (`mode=limit`) |
+| `market_order` | **yes — real money** (`mode=market`, needs `sell_fractions`) |
+| `stop_market_order` | **yes — real money** (`mode=stopMarket`, needs `stop`; sell = stop-loss) |
+| `simple_create_order` | **yes** — backcompat wrapper for limit |
+| `cancel_order` | **yes — real money** |
 | `savings_plans`, `savings_plan_parameters` | no |
 | `create_savings_plan`, `change_savings_plan`, `cancel_savings_plan` | **yes** |
 | `price_alarms`, `create_price_alarm`, `cancel_price_alarm` | create/cancel yes |
 | `news_subscriptions`, `subscribe_news`, `unsubscribe_news` | subscribe yes |
 
-`TrBlockingApi` wraps the common **read** calls for scripts. Async `TRApi` plus `start()` is required for streaming (`ticker`).
+Order helpers share `simpleCreateOrder` on the WebSocket. Expiry: `gfd`, `gtc`, or `gtd` (requires `expiry_date`). There is **no dry-run**. Amend a stop-loss by `cancel_order` + recreate (`changeOrder` is not wrapped). A separate `confirmOrder` step is **not** required for this flow (same as [pytr](https://github.com/pytr-org/pytr)).
+
+`TrBlockingApi` wraps the common **read** calls for scripts. Async `TRApi` plus `start()` is required for streaming (`ticker`). Order create/cancel are async-only in this release.
+
+MCP trading tools (`place_limit_order`, `place_stop_market_order`, `cancel_order`) exist behind
+`TR_MCP_TRADING_ENABLED` (default off) with the same confirm_token flow as watchlist writes.
+There is still no dry-run.
 
 ## What is missing or incomplete
 
@@ -94,7 +104,7 @@ Compared with [pytr](https://github.com/pytr-org/pytr):
 
 - No AWS WAF / Playwright path for **v1 web login**. This client uses **v2** (no WAF).
 - REST cost transparency and payout confirm.
-- Order extras: `confirmOrder`, `changeOrder`, `collection`.
+- `changeOrder` (workaround: cancel + recreate).
 - Watchlist extras: named/follow/unfollow lists.
 - CSV export does not cover interest, card payments, saveback, tax refunds, or reinvested dividends. Converters still expect German timeline text.
 - `asyncio.get_event_loop()` in `TrBlockingApi` is the old pattern (works, noisy on Python 3.10+).
@@ -111,7 +121,7 @@ make check
 make test
 ```
 
-These cover protocol deltas, argument validation, public method surface, v2 header shape, and an unauthenticated `connect 31` search-tags call.
+These cover protocol deltas, argument validation, public method surface, order payload construction (limit / market / stopMarket / gtd), v2 header shape, and an unauthenticated `connect 31` search-tags call.
 
 ### Live read-only (real account)
 
@@ -129,6 +139,6 @@ export TR_LIVE_TESTS=1 TR_PHONE='+49...' TR_PIN='...' TR_LOCALE=de
 python3 -m unittest tests.test_api.LiveReadOnlyTest -v
 ```
 
-Do **not** point live tests at `simple_create_order` / cancel / savings-plan mutate methods.
+Do **not** point live tests at `limit_order` / `market_order` / `stop_market_order` / `simple_create_order` / `cancel_order` / savings-plan mutate methods.
 
 Do not commit `tr_cookies.txt`, `key`, `environment.py`, or timeline dumps.
