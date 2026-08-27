@@ -30,6 +30,8 @@ class ErrorKind(str, Enum):
     RATE_LIMITED = "rate_limited"
     SESSION_EXPIRED = "session_expired"
     LOGIN_REQUIRED = "login_required"
+    AWAITING_PUSH_CONFIRM = "awaiting_push_confirm"
+    AWAITING_AUTHENTICATOR = "awaiting_authenticator"
     AUTH_FAILED = "auth_failed"
     NETWORK = "network"
     SERVER = "server"
@@ -179,6 +181,72 @@ def circuit_state_path_for_cookies(cookies_file: str | Path) -> Path:
     """Auth-circuit JSON next to the cookies file (both resolved to absolute paths)."""
     path = resolve_runtime_path(cookies_file)
     return path.with_name(path.name + ".auth_circuit.json")
+
+
+def login_process_path_for_cookies(cookies_file: str | Path) -> Path:
+    """In-flight web-login process id next to the cookies file (survives MCP respawns)."""
+    path = resolve_runtime_path(cookies_file)
+    return path.with_name(path.name + ".login_process.json")
+
+
+def load_login_process(path: Path) -> dict[str, Any] | None:
+    """Return persisted push-login process if present and not expired."""
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    process_id = data.get("process_id")
+    if not process_id or not isinstance(process_id, str):
+        return None
+    expires_at = data.get("expires_at")
+    now = time.time()
+    if isinstance(expires_at, (int, float)):
+        # TR often sends ms epoch.
+        exp = float(expires_at) / 1000.0 if expires_at > 1e11 else float(expires_at)
+        if exp <= now:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return None
+    return {
+        "process_id": process_id,
+        "expires_at": expires_at,
+        "created_at": data.get("created_at"),
+    }
+
+
+def save_login_process(
+    path: Path,
+    *,
+    process_id: str,
+    expires_at: Any = None,
+) -> None:
+    """Persist in-flight login process so auto-recover can poll after MCP respawn."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "process_id": process_id,
+        "expires_at": expires_at,
+        "created_at": time.time(),
+    }
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    tmp.replace(path)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+def clear_login_process(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 class AuthCircuitBreaker:

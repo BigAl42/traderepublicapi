@@ -56,25 +56,35 @@ def error_payload(exc: BaseException) -> dict[str, Any]:
     if isinstance(exc, TradeRepublicClientError):
         kind_value = getattr(exc.kind, "value", None) or ErrorKind.UNKNOWN.value
         retry_after = exc.retry_after_seconds
-        if kind_value == ErrorKind.RATE_LIMITED.value:
+        if exc.guidance:
+            guidance = exc.guidance
+        elif kind_value == ErrorKind.RATE_LIMITED.value:
             guidance = (
                 "Auth circuit is open or TR rate-limited login. Do not trigger push login. "
-                "Call get_adapter_status, wait retry_after_seconds, then resume from "
-                "TR_TOKEN / cookies via check_login.py if needed."
+                "Call get_adapter_status, wait retry_after_seconds. Do NOT run "
+                "check_login.py / trigger_login.py / custom Python from the agent."
+            )
+        elif kind_value == ErrorKind.AWAITING_PUSH_CONFIRM.value:
+            guidance = (
+                "A Trade Republic app push was already sent. Ask the user to confirm it, "
+                "then call the SAME MCP tool again (not a login script). Do NOT start a "
+                "new login or run check_login.py / trigger_login.py / tr.login()."
+            )
+        elif kind_value == ErrorKind.AWAITING_AUTHENTICATOR.value:
+            guidance = (
+                "Ask the user for their Trade Republic authenticator code, then retry the "
+                "SAME MCP tool (session renew runs automatically). Do not write login scripts."
             )
         elif kind_value == ErrorKind.LOGIN_REQUIRED.value:
             guidance = (
-                "Trade Republic session is cold. Soft auto-renew already ran. "
-                "Call renew_session next — if status is awaiting_push_confirm, ask the "
-                "user to confirm the Trade Republic app push, then call renew_session "
-                "again. Do NOT switch to ClawStreet or invent browser cookie scraping. "
-                "Retry the same account tool once session is ready."
+                "Trade Republic session is cold and automatic renew failed. Retry the same "
+                "MCP tool after the operator sets TR_TOKEN or TR_PHONE/TR_PIN. Do NOT run "
+                "check_login.py, trigger_login.py, tr.login(), or switch providers."
             )
         elif kind_value == ErrorKind.SESSION_EXPIRED.value:
             guidance = (
-                "Session expired mid-call. Retry the same MCP tool once (soft auto-renew). "
-                "If it fails, call renew_session (app push confirm if asked). "
-                "Do not change data providers."
+                "Session expired mid-call. Retry the same MCP tool once. Do not write "
+                "login scripts or change providers."
             )
         elif exc.retryable:
             guidance = (
@@ -83,7 +93,7 @@ def error_payload(exc: BaseException) -> dict[str, Any]:
             )
         else:
             guidance = "Fix configuration (credentials, client version) before retrying."
-        return {
+        payload: dict[str, Any] = {
             "status": "error",
             "code": kind_value,
             "message": redact_secrets(str(exc)),
@@ -91,6 +101,11 @@ def error_payload(exc: BaseException) -> dict[str, Any]:
             "retry_after_seconds": retry_after,
             "guidance": guidance,
         }
+        if kind_value == ErrorKind.AWAITING_PUSH_CONFIRM.value:
+            payload["status"] = "awaiting_push_confirm"
+        elif kind_value == ErrorKind.AWAITING_AUTHENTICATOR.value:
+            payload["status"] = "awaiting_authenticator"
+        return payload
     return {
         "status": "error",
         "code": "unexpected",

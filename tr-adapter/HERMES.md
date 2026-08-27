@@ -15,7 +15,7 @@ After config change or image update:
    python3 smoke_mcp.py --stdio
    ```
 
-   Expect **35 tools** and OK for `get_adapter_status`, `get_account_summary`,
+   Expect **34 tools** and OK for `get_adapter_status`, `get_account_summary`,
    `search_instruments`.
 
 4. Optional live read smoke (credentials required):
@@ -32,26 +32,27 @@ TR_MCP_ALLOW_INTERACTIVE_LOGIN=0
 TR_MCP_WRITE_ENABLED=0
 TR_MCP_TRADING_ENABLED=0
 TR_MCP_AUTO_RENEW=1               # soft cookie/token renew on 401 (default on)
-TR_MCP_RENEW_ALLOW_PUSH=1         # renew_session may start app push when cookies dead
-TR_TOKEN=...                      # or warm TR_COOKIES_FILE via check_login.py / renew_session
+TR_MCP_RENEW_ALLOW_PUSH=1         # auto-recover may start app push when cookies dead
+TR_TOKEN=...                      # or warm TR_COOKIES_FILE via check_login.py (operator)
 # Optional: pin cookie/circuit/confirm files when Hermes cwd varies
 # TR_ADAPTER_DATA_DIR=/opt/data/home/traderepublicapi/tr-adapter
 ```
 
-Warm session offline — not from agent login loops:
+Warm session offline — **operator / human only**, never from the Hermes agent:
 
 ```bash
 python3 check_login.py
 ```
 
-Or from Hermes: call MCP tool `renew_session` (confirm push in the app when asked).
+From Hermes agents: use normal read/write MCP tools only. Session renew runs
+automatically inside those tools (app push when needed). Never invent
+`trigger_login.py` / run `check_login.py` / `tr.login()` from the agent.
 
-## MCP tools (35)
+## MCP tools (34)
 
 | Tool | Auth | Notes |
 |------|------|--------|
 | `get_adapter_status` | no TR call | **Call first** on errors / cooldown |
-| `renew_session` | soft / push | **Cold 401 fix** — confirm app push when asked |
 | `get_account_summary` | yes | Cash / buying power |
 | `list_active_positions` | yes | Holdings |
 | `get_position_details` | yes | One ISIN |
@@ -95,7 +96,21 @@ Paste or adapt into the Hermes agent system prompt.
 
 Cursor agents in this repo: read the project skill
 [`.cursor/skills/trade-republic-mcp/SKILL.md`](../.cursor/skills/trade-republic-mcp/SKILL.md)
-before operating the MCP (confirm_token, trading, errors).
+before operating the MCP (session renew, confirm_token, trading, errors).
+
+### Session renew (mandatory — prevents push storms)
+
+There is **no** separate login MCP tool. Authenticated tools auto-renew:
+soft refresh → cookie/TR_TOKEN resume → optional app push (one `process_id`,
+persisted across MCP respawns). Do **not** write or run `trigger_login.py`,
+`check_login.py`, `tr.login()`, or any custom Python login.
+
+1. Account tool fails → `get_adapter_status`.
+2. If `status=awaiting_push_confirm`: tell the user a push was **already** sent;
+   wait for app confirmation; call the **same** original tool again to poll/finalize.
+3. If the tool succeeds after retry: continue normally.
+4. Never start a second login while `login_process_id` / `awaiting_push_confirm`
+   is set — that sends another push and ignores the first confirmation.
 
 ### On any tool error
 
@@ -104,23 +119,23 @@ before operating the MCP (confirm_token, trading, errors).
 3. **Never** trigger push login from the agent when
    `TR_MCP_ALLOW_INTERACTIVE_LOGIN=0` (production default).
 4. **Never** switch to ClawStreet / other providers for TR account or portfolio
-   tools. Soft auto-renew runs on 401; if cookies are fully dead call
-   `renew_session` (app push). Do not invent browser cookie scraping.
+   tools. Soft auto-renew runs on 401; if cookies are fully dead the adapter
+   may send an app push — retry the same tool after confirmation. Do not invent
+   browser cookie scraping.
 
 ### When `code` is `login_required` or `session_expired`
 
-- Soft auto-renew already attempted.
-- Call `renew_session` (not other providers).
+- Soft auto-renew already attempted (may have sent a push).
+- Retry the **same** original MCP tool (not other providers, not custom scripts).
 - If `status=awaiting_push_confirm`: tell the user to confirm in the Trade Republic
-  app, then call `renew_session` again.
-- If `status=ready`: retry the **same** original account tool once.
-- Call `get_adapter_status` to inspect `last_renew_result` / `last_renew_http_status`.
+  app, then call the **same** tool again (poll — do not start a new push).
+- Call `get_adapter_status` to inspect `last_renew_result` / `login_process_id`.
 
 ### When charts/search return 401 but no account is needed
 
 Dead `tr_session` cookies used to poison the public WebSocket connect. The adapter
 now drops the in-memory session cookie and retries anonymously. Account tools still
-need `renew_session` / fresh cookies.
+need a warm session (auto-renew / app push via retry of the same tool).
 
 ### When `code` is `rate_limited` or status is `cooldown`
 
@@ -274,7 +289,7 @@ Current schemas (verified via `mcp.list_tools()`): all parameterized tools use f
 | `missing required argument(s): ticker` via Hermes, smoke OK | Tool Search bridge / flattened args | Upgrade Hermes; try `tool_search.enabled: off`; see section above |
 | `This event loop is already running` in `mcp-stderr.log` | Sync `TrBlockingApi` / `run_until_complete` inside FastMCP loop | Deploy current adapter (`TRApi` async only). Never point Hermes at scripts that use `TrBlockingApi`. |
 | Tools missing after runtime errors | Hermes drops/fails MCP server after tool errors | Fix loop bug, restart watchdog, re-run `python3 smoke_mcp.py` |
-| `login_required` | Cold session | Call `renew_session` (app push); or `check_login.py` / fresh `TR_TOKEN` |
+| `login_required` | Cold session | Retry same MCP tool (auto push); operator: `check_login.py` / fresh `TR_TOKEN` |
 | `writes_disabled` | Expected in prod | Set `TR_MCP_WRITE_ENABLED=1` only if needed |
 | `trading_disabled` | Expected in prod | Set `TR_MCP_TRADING_ENABLED=1` only for real-money trading |
 | JSON error with `guidance` | Structured adapter error | Follow `guidance`; respect `retry_after_seconds` |

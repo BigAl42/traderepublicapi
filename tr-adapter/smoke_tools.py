@@ -17,7 +17,6 @@ ADAPTER_DIR = Path(__file__).resolve().parent
 EXPECTED_MCP_TOOLS: frozenset[str] = frozenset(
     {
         "get_adapter_status",
-        "renew_session",
         "get_account_summary",
         "list_active_positions",
         "get_position_details",

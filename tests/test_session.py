@@ -22,7 +22,11 @@ from session import (  # noqa: E402
     adapter_dir,
     circuit_state_path_for_cookies,
     classify_auth_error,
+    clear_login_process,
+    load_login_process,
+    login_process_path_for_cookies,
     resolve_runtime_path,
+    save_login_process,
 )
 
 
@@ -64,6 +68,34 @@ class ResolveRuntimePathTest(unittest.TestCase):
                     Path(tmp).resolve() / "tr_cookies.txt.auth_circuit.json",
                 )
 
+    def test_login_process_roundtrip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "c.txt.login_process.json"
+            save_login_process(path, process_id="abc-123", expires_at=time.time() + 600)
+            loaded = load_login_process(path)
+            self.assertEqual(loaded["process_id"], "abc-123")
+            clear_login_process(path)
+            self.assertIsNone(load_login_process(path))
+
+    def test_login_process_expired_clears(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "c.txt.login_process.json"
+            save_login_process(path, process_id="old", expires_at=time.time() - 10)
+            self.assertIsNone(load_login_process(path))
+            self.assertFalse(path.is_file())
+
+    def test_login_process_path_next_to_cookies(self):
+        import os
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"TR_ADAPTER_DATA_DIR": tmp}):
+                path = login_process_path_for_cookies("tr_cookies.txt")
+                self.assertEqual(
+                    path,
+                    Path(tmp).resolve() / "tr_cookies.txt.login_process.json",
+                )
+
     def test_circuit_lock_lives_next_to_absolute_state(self):
         with tempfile.TemporaryDirectory() as tmp:
             # Change cwd so a relative state path would diverge without resolve_runtime_path.
@@ -85,7 +117,10 @@ class ResolveRuntimePathTest(unittest.TestCase):
                     )
                 )
                 self.assertTrue(lock_path.is_file())
-                self.assertEqual(lock_path.parent, state.parent)
+                self.assertEqual(
+                    os.path.realpath(lock_path.parent),
+                    os.path.realpath(state.parent),
+                )
             finally:
                 os.chdir(original)
 
@@ -166,7 +201,7 @@ class AuthCircuitBreakerTest(unittest.TestCase):
 class WriteSessionPolicyTest(unittest.TestCase):
     def test_write_path_does_not_login_when_cold(self):
         import os
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import AsyncMock, MagicMock, patch
 
         with patch.dict(os.environ, {"TR_TOKEN": "tok", "TR_PHONE": "", "TR_PIN": ""}, clear=False):
             with tempfile.TemporaryDirectory() as tmp:
@@ -181,14 +216,17 @@ class WriteSessionPolicyTest(unittest.TestCase):
                         from tr_client import TradeRepublicClient, TradeRepublicClientError
 
                         client = TradeRepublicClient(token="tok")
+                        client._soft_refresh_session = AsyncMock(return_value=False)
+                        client._maybe_resume_inflight_push = AsyncMock()
+                        client._recover_session = AsyncMock(return_value=False)
                         with self.assertRaises(TradeRepublicClientError) as ctx:
                             asyncio.run(client._ensure_session_for_write())
-                        self.assertEqual(ctx.exception.kind, ErrorKind.LOGIN_REQUIRED)
+                        self.assertEqual(ctx.exception.kind, ErrorKind.SESSION_EXPIRED)
                         api.login.assert_not_called()
 
     def test_interactive_login_defaults_off(self):
         import os
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import AsyncMock, MagicMock, patch
 
         env = {
             "TR_TOKEN": "",
@@ -214,10 +252,9 @@ class WriteSessionPolicyTest(unittest.TestCase):
                         importlib.reload(tr_client)
                         client = tr_client.TradeRepublicClient()
                         self.assertFalse(client._allow_interactive_login)
-                        with self.assertRaises(tr_client.TradeRepublicClientError) as ctx:
-                            asyncio.run(client._ensure_session(allow_login=True))
-                        self.assertEqual(ctx.exception.kind, ErrorKind.LOGIN_REQUIRED)
+                        asyncio.run(client._ensure_session(allow_login=True))
                         api.login.assert_not_called()
+                        self.assertFalse(client._session_ready)
 
 
 if __name__ == "__main__":
