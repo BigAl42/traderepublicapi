@@ -15,7 +15,7 @@ After config change or image update:
    python3 smoke_mcp.py --stdio
    ```
 
-   Expect **29 tools** and OK for `get_adapter_status`, `get_account_summary`,
+   Expect **32 tools** and OK for `get_adapter_status`, `get_account_summary`,
    `search_instruments`.
 
 4. Optional live read smoke (credentials required):
@@ -30,6 +30,7 @@ After config change or image update:
 ```bash
 TR_MCP_ALLOW_INTERACTIVE_LOGIN=0
 TR_MCP_WRITE_ENABLED=0
+TR_MCP_TRADING_ENABLED=0
 TR_TOKEN=...                      # or warm TR_COOKIES_FILE via check_login.py
 ```
 
@@ -39,7 +40,7 @@ Warm session offline — not from agent login loops:
 python3 check_login.py
 ```
 
-## MCP tools (29)
+## MCP tools (32)
 
 | Tool | Auth | Notes |
 |------|------|--------|
@@ -72,6 +73,9 @@ python3 check_login.py
 | `get_account_pairs` | yes | Depot / cash account numbers |
 | `add_to_watchlist` | yes + write flag | Mutating; confirm_token flow |
 | `remove_from_watchlist` | yes + write flag | Mutating; confirm_token flow |
+| `place_limit_order` | yes + trading flag | **Real money**; confirm_token bound to params |
+| `place_stop_market_order` | yes + trading flag | **Real money**; stop-loss / stop-buy |
+| `cancel_order` | yes + trading flag | **Real money**; confirm_token bound to order_id |
 
 Hermes exposes these as `mcp__<server_name>__<tool_name>` (e.g.
 `mcp__trade-republic__get_adapter_status`).
@@ -79,6 +83,10 @@ Hermes exposes these as `mcp__<server_name>__<tool_name>` (e.g.
 ## Agent policy (mandatory behaviour)
 
 Paste or adapt into the Hermes agent system prompt.
+
+Cursor agents in this repo: read the project skill
+[`.cursor/skills/trade-republic-mcp/SKILL.md`](../.cursor/skills/trade-republic-mcp/SKILL.md)
+before operating the MCP (confirm_token, trading, errors).
 
 ### On any tool error
 
@@ -95,8 +103,9 @@ Paste or adapt into the Hermes agent system prompt.
 
 ### When status is `write_backoff`
 
-- Do not call `add_to_watchlist` / `remove_from_watchlist` until backoff ends.
-- Use `get_watchlist` to inspect state instead of repeating the write.
+- Do not call watchlist or trading mutate tools until backoff ends.
+- Use `get_watchlist` / `list_open_orders` to inspect state instead of repeating
+  the write.
 
 ### Watchlist mutations
 
@@ -108,6 +117,20 @@ Only when `TR_MCP_WRITE_ENABLED=1` and user explicitly asked:
    `confirm_token`.
 3. If result is `uncertain` or verify failed: wait `retry_after_seconds`,
    check watchlist, do **not** immediately mutate again.
+
+### Trading mutations (real money)
+
+Only when `TR_MCP_TRADING_ENABLED=1` and the user explicitly asked to trade.
+There is **no dry-run**.
+
+1. Prefer `get_order_preview` / `get_instrument_suitability` / `get_account_summary`
+   first.
+2. `place_limit_order` / `place_stop_market_order` / `cancel_order` with
+   `confirmed=false` → German `message` + `confirm_token` bound to parameters.
+3. Ask the user clearly; on consent only: retry with **identical** parameters,
+   `confirmed=true`, and that `confirm_token`.
+4. If result is `uncertain`: wait `retry_after_seconds`, call `list_open_orders`,
+   do **not** immediately place/cancel again.
 
 ### Preferred read order for portfolio questions
 
@@ -125,6 +148,7 @@ Only when `TR_MCP_WRITE_ENABLED=1` and user explicitly asked:
 | Only 2 tools in agent | Stale gateway catalog / allowlist | Restart watchdog; run `smoke_mcp.py --stdio` |
 | `login_required` | Cold session | `check_login.py` offline; set `TR_TOKEN` |
 | `writes_disabled` | Expected in prod | Set `TR_MCP_WRITE_ENABLED=1` only if needed |
+| `trading_disabled` | Expected in prod | Set `TR_MCP_TRADING_ENABLED=1` only for real-money trading |
 | JSON error with `guidance` | Structured adapter error | Follow `guidance`; respect `retry_after_seconds` |
 
 ## Docker

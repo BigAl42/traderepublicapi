@@ -17,7 +17,10 @@ from mcp_write import (  # noqa: E402
     ConfirmationError,
     ConfirmationStore,
     confirmation_required,
+    normalize_binding,
+    order_confirmation_message,
     require_confirmation,
+    trading_enabled,
     write_enabled,
 )
 
@@ -29,9 +32,13 @@ class WriteEnabledTest(unittest.TestCase):
 
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("TR_MCP_WRITE_ENABLED", None)
+            os.environ.pop("TR_MCP_TRADING_ENABLED", None)
             self.assertFalse(write_enabled())
+            self.assertFalse(trading_enabled())
         with patch.dict(os.environ, {"TR_MCP_WRITE_ENABLED": "1"}):
             self.assertTrue(write_enabled())
+        with patch.dict(os.environ, {"TR_MCP_TRADING_ENABLED": "1"}):
+            self.assertTrue(trading_enabled())
 
 
 class ConfirmationStoreTest(unittest.TestCase):
@@ -59,6 +66,41 @@ class ConfirmationStoreTest(unittest.TestCase):
             with self.assertRaises(ConfirmationError) as ctx:
                 store.redeem("remove_from_watchlist", "US0378331005", token)
             self.assertIn("does not match", str(ctx.exception).lower())
+
+    def test_binding_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ConfirmationStore(Path(tmp) / "confirmations.json")
+            binding = {"size": 1, "limit": 100.0, "order_type": "buy"}
+            token = store.issue(
+                "place_limit_order", "US0378331005", binding=binding
+            )["confirm_token"]
+            with self.assertRaises(ConfirmationError):
+                store.redeem(
+                    "place_limit_order",
+                    "US0378331005",
+                    token,
+                    binding={"size": 2, "limit": 100.0, "order_type": "buy"},
+                )
+
+    def test_binding_match(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ConfirmationStore(Path(tmp) / "confirmations.json")
+            binding = {"size": 1.5, "limit": 100.0, "order_type": "sell"}
+            token = store.issue(
+                "place_limit_order", "US0378331005", binding=binding
+            )["confirm_token"]
+            store.redeem(
+                "place_limit_order",
+                "US0378331005",
+                token,
+                binding={"size": 1.5, "limit": 100.0, "order_type": "sell"},
+            )
+
+    def test_normalize_binding_float(self):
+        self.assertEqual(
+            normalize_binding({"limit": 10.0, "size": 1}),
+            {"limit": "10", "size": "1"},
+        )
 
     def test_expired_token(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -93,6 +135,20 @@ class ConfirmationStoreTest(unittest.TestCase):
                     "US0378331005",
                     payload["confirm_token"],
                 )
+
+    def test_order_confirmation_message(self):
+        msg = order_confirmation_message(
+            action="place_stop_market_order",
+            ticker="US0378331005",
+            instrument_name="Apple",
+            order_type="sell",
+            size=2,
+            stop=90,
+            expiry="gtc",
+            exchange="LSX",
+        )
+        self.assertIn("Stop-Loss", msg)
+        self.assertIn("ECHTES GELD", msg)
 
 
 if __name__ == "__main__":

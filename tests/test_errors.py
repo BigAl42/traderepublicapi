@@ -14,7 +14,11 @@ if str(ADAPTER_DIR) not in sys.path:
     sys.path.insert(0, str(ADAPTER_DIR))
 
 from errors import error_payload, raise_structured  # noqa: E402
-from mcp_write import ConfirmationError, WriteToolsDisabledError  # noqa: E402
+from mcp_write import (  # noqa: E402
+    ConfirmationError,
+    TradingToolsDisabledError,
+    WriteToolsDisabledError,
+)
 from session import ErrorKind  # noqa: E402
 from tr_client import TradeRepublicClient, TradeRepublicClientError  # noqa: E402
 
@@ -39,6 +43,11 @@ class StructuredErrorTest(unittest.TestCase):
         data = json.loads(str(ctx.exception))
         self.assertEqual(data["code"], "writes_disabled")
 
+    def test_trading_disabled_payload(self):
+        payload = error_payload(TradingToolsDisabledError("off"))
+        self.assertEqual(payload["code"], "trading_disabled")
+        self.assertIn("TR_MCP_TRADING_ENABLED", payload["guidance"])
+
     def test_confirmation_payload(self):
         payload = error_payload(ConfirmationError("missing token"))
         self.assertEqual(payload["code"], "confirmation_required_or_invalid")
@@ -56,6 +65,7 @@ class AdapterStatusTest(unittest.TestCase):
                     "TR_PIN": "",
                     "TR_COOKIES_FILE": str(cookies),
                     "TR_MCP_WRITE_ENABLED": "",
+                    "TR_MCP_TRADING_ENABLED": "",
                     "TR_MCP_ALLOW_INTERACTIVE_LOGIN": "0",
                 },
                 clear=False,
@@ -66,6 +76,7 @@ class AdapterStatusTest(unittest.TestCase):
                 status = client.get_adapter_status()
                 self.assertEqual(status["status"], "unconfigured")
                 self.assertFalse(status["write_enabled"])
+                self.assertFalse(status["trading_enabled"])
                 self.assertFalse(status["allow_interactive_login"])
                 self.assertFalse(status["auth_circuit_open"])
 

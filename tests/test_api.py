@@ -37,6 +37,201 @@ class ValidationTest(unittest.IsolatedAsyncioTestCase):
             await self.api.derivatives("US0000000000", "unknown")
 
 
+class OrderPayloadTest(unittest.TestCase):
+    def setUp(self):
+        self.api = TRApi("+49000000000", "0000")
+
+    def test_limit_payload(self):
+        payload = self.api._build_simple_create_order_payload(
+            mode="limit",
+            isin="US0378331005",
+            order_type="buy",
+            size=1,
+            limit=150.5,
+            expiry="gfd",
+            order_id="client-1",
+        )
+        self.assertEqual(payload["type"], "simpleCreateOrder")
+        self.assertEqual(payload["clientProcessId"], "client-1")
+        self.assertEqual(payload["warningsShown"], ["userExperience"])
+        self.assertEqual(payload["acceptedWarnings"], ["userExperience"])
+        self.assertEqual(
+            payload["parameters"],
+            {
+                "instrumentId": "US0378331005",
+                "exchangeId": "LSX",
+                "expiry": {"type": "gfd"},
+                "mode": "limit",
+                "size": 1,
+                "type": "buy",
+                "limit": 150.5,
+            },
+        )
+
+    def test_market_payload(self):
+        payload = self.api._build_simple_create_order_payload(
+            mode="market",
+            isin="US0378331005",
+            order_type="sell",
+            size=2,
+            sell_fractions=True,
+            expiry="gtc",
+            order_id="client-2",
+        )
+        params = payload["parameters"]
+        self.assertEqual(params["mode"], "market")
+        self.assertTrue(params["sellFractions"])
+        self.assertNotIn("limit", params)
+        self.assertNotIn("stop", params)
+
+    def test_stop_market_payload(self):
+        payload = self.api._build_simple_create_order_payload(
+            mode="stopMarket",
+            isin="US0378331005",
+            order_type="sell",
+            size=3,
+            stop=100.0,
+            expiry="gtc",
+            order_id="client-3",
+        )
+        params = payload["parameters"]
+        self.assertEqual(params["mode"], "stopMarket")
+        self.assertEqual(params["stop"], 100.0)
+        self.assertNotIn("limit", params)
+        self.assertNotIn("sellFractions", params)
+
+    def test_gtd_requires_and_sets_expiry_date(self):
+        with self.assertRaises(TRapiException):
+            self.api._build_simple_create_order_payload(
+                mode="limit",
+                isin="US0378331005",
+                order_type="buy",
+                size=1,
+                limit=10,
+                expiry="gtd",
+            )
+        payload = self.api._build_simple_create_order_payload(
+            mode="limit",
+            isin="US0378331005",
+            order_type="buy",
+            size=1,
+            limit=10,
+            expiry="gtd",
+            expiry_date="2026-12-31",
+            order_id="client-gtd",
+        )
+        self.assertEqual(
+            payload["parameters"]["expiry"],
+            {"type": "gtd", "value": "2026-12-31"},
+        )
+
+    def test_auto_uuid_when_order_id_omitted(self):
+        payload = self.api._build_simple_create_order_payload(
+            mode="limit",
+            isin="US0378331005",
+            order_type="buy",
+            size=1,
+            limit=10,
+            expiry="gfd",
+        )
+        self.assertEqual(len(payload["clientProcessId"]), 36)
+
+    def test_custom_warnings(self):
+        payload = self.api._build_simple_create_order_payload(
+            mode="limit",
+            isin="US0378331005",
+            order_type="buy",
+            size=1,
+            limit=10,
+            expiry="gfd",
+            warnings_shown=[],
+            order_id="w",
+        )
+        self.assertEqual(payload["warningsShown"], [])
+        self.assertEqual(payload["acceptedWarnings"], [])
+
+    def test_validation_errors(self):
+        cases = [
+            dict(mode="nope", isin="US0378331005", order_type="buy", size=1, expiry="gfd"),
+            dict(mode="limit", isin="US0378331005", order_type="hold", size=1, limit=1, expiry="gfd"),
+            dict(mode="limit", isin="US0378331005", order_type="buy", size=1, limit=1, expiry="never"),
+            dict(
+                mode="limit",
+                isin="US0378331005",
+                order_type="buy",
+                size=1,
+                limit=1,
+                expiry="gfd",
+                exchange="XXX",
+            ),
+            dict(mode="limit", isin="US0378331005", order_type="buy", size=1, expiry="gfd"),
+            dict(
+                mode="market",
+                isin="US0378331005",
+                order_type="buy",
+                size=1,
+                expiry="gfd",
+            ),
+            dict(
+                mode="stopMarket",
+                isin="US0378331005",
+                order_type="sell",
+                size=1,
+                expiry="gfd",
+            ),
+        ]
+        for kwargs in cases:
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaises(TRapiException):
+                    self.api._build_simple_create_order_payload(**kwargs)
+
+
+class OrderSubmitTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.api = TRApi("+49000000000", "0000")
+        self.captured = {}
+
+        async def fake_sub(typ, callback=print, payload=None, one_shot=False, key=None):
+            self.captured["typ"] = typ
+            self.captured["payload"] = payload
+            self.captured["key"] = key
+            return {"ok": True}
+
+        self.api.sub = fake_sub  # type: ignore[method-assign]
+
+    async def test_limit_order_submits_payload(self):
+        result = await self.api.limit_order(
+            "US0378331005", "buy", 1, 150.0, "gfd", order_id="lim-1"
+        )
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(self.captured["typ"], "simpleCreateOrder")
+        self.assertEqual(self.captured["payload"]["parameters"]["mode"], "limit")
+        self.assertEqual(self.captured["payload"]["parameters"]["limit"], 150.0)
+        self.assertEqual(self.captured["key"], "simpleCreateOrder lim-1")
+
+    async def test_market_order_submits_payload(self):
+        await self.api.market_order(
+            "US0378331005", "sell", 2, "gfd", True, order_id="mkt-1"
+        )
+        self.assertEqual(self.captured["payload"]["parameters"]["mode"], "market")
+        self.assertTrue(self.captured["payload"]["parameters"]["sellFractions"])
+
+    async def test_stop_market_order_submits_payload(self):
+        await self.api.stop_market_order(
+            "US0378331005", "sell", 3, 99.5, "gtc", order_id="sl-1"
+        )
+        self.assertEqual(self.captured["payload"]["parameters"]["mode"], "stopMarket")
+        self.assertEqual(self.captured["payload"]["parameters"]["stop"], 99.5)
+
+    async def test_simple_create_order_backcompat(self):
+        await self.api.simple_create_order(
+            "legacy-1", "US0378331005", "buy", 1, 42.0, "gfd"
+        )
+        self.assertEqual(self.captured["payload"]["clientProcessId"], "legacy-1")
+        self.assertEqual(self.captured["payload"]["parameters"]["mode"], "limit")
+        self.assertEqual(self.captured["payload"]["parameters"]["limit"], 42.0)
+
+
 class SurfaceTest(unittest.TestCase):
     def test_type_to_id_defaults(self):
         api = TRApi("+49000000000", "0000")

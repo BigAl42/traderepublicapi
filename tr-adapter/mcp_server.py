@@ -20,7 +20,9 @@ from typing import Annotated
 from tr_client import TradeRepublicClient, TradeRepublicClientError
 from mcp_write import (
     confirmation_required,
+    order_confirmation_message,
     require_confirmation,
+    require_trading_enabled,
     require_write_enabled,
 )
 from errors import raise_structured
@@ -853,6 +855,230 @@ async def remove_from_watchlist(
             get_client().remove_from_watchlist,
             confirm_token=confirm_token,
         )
+    except Exception as exc:
+        raise_structured(exc)
+
+
+def _limit_order_binding(
+    ticker: str,
+    order_type: str,
+    size: float,
+    limit: float,
+    expiry: str,
+    exchange: str,
+    expiry_date: str | None,
+) -> dict:
+    return {
+        "ticker": ticker,
+        "order_type": order_type,
+        "size": size,
+        "limit": limit,
+        "expiry": expiry,
+        "exchange": exchange,
+        "expiry_date": expiry_date or "",
+    }
+
+
+def _stop_order_binding(
+    ticker: str,
+    order_type: str,
+    size: float,
+    stop: float,
+    expiry: str,
+    exchange: str,
+    expiry_date: str | None,
+) -> dict:
+    return {
+        "ticker": ticker,
+        "order_type": order_type,
+        "size": size,
+        "stop": stop,
+        "expiry": expiry,
+        "exchange": exchange,
+        "expiry_date": expiry_date or "",
+    }
+
+
+@mcp.tool()
+@log_tool_call("place_limit_order")
+async def place_limit_order(
+    ticker: str,
+    order_type: str,
+    size: float,
+    limit: float,
+    expiry: str = "gfd",
+    exchange: str = "LSX",
+    expiry_date: str | None = None,
+    confirmed: bool = False,
+    confirm_token: str | None = None,
+) -> dict:
+    """Place a limit buy/sell order on Trade Republic.
+
+    MUTATING — REAL MONEY. There is no dry-run.
+
+    Workflow:
+    1. Prefer get_order_preview / get_instrument_suitability first.
+    2. Call with confirmed=false → confirmation_required + German message + confirm_token
+       bound to ticker/side/size/limit/expiry/exchange.
+    3. After explicit user consent, retry with confirmed=true and the same parameters
+       plus that confirm_token. Changed parameters invalidate the token.
+
+    Requires TR_MCP_TRADING_ENABLED=1 and a warm login session.
+    """
+    try:
+        require_trading_enabled()
+        validated = TickerInput(ticker=ticker)
+        client = get_client()
+        side = (order_type or "").strip().lower()
+        exch = (exchange or "LSX").strip().upper()
+        exp = (expiry or "gfd").strip().lower()
+        binding = _limit_order_binding(
+            validated.ticker, side, size, limit, exp, exch, expiry_date
+        )
+        if not confirmed:
+            name = await client.instrument_label(validated.ticker)
+            return confirmation_required(
+                "place_limit_order",
+                validated.ticker,
+                instrument_name=name,
+                binding=binding,
+                message=order_confirmation_message(
+                    action="place_limit_order",
+                    ticker=validated.ticker,
+                    instrument_name=name,
+                    order_type=side,
+                    size=size,
+                    limit=limit,
+                    expiry=exp,
+                    exchange=exch,
+                ),
+            )
+        require_confirmation(
+            "place_limit_order",
+            validated.ticker,
+            confirm_token,
+            binding=binding,
+        )
+        return await client.place_limit_order(
+            validated.ticker,
+            side,
+            size,
+            limit,
+            expiry=exp,
+            exchange=exch,
+            expiry_date=expiry_date,
+        )
+    except Exception as exc:
+        raise_structured(exc)
+
+
+@mcp.tool()
+@log_tool_call("place_stop_market_order")
+async def place_stop_market_order(
+    ticker: str,
+    order_type: str,
+    size: float,
+    stop: float,
+    expiry: str = "gtc",
+    exchange: str = "LSX",
+    expiry_date: str | None = None,
+    confirmed: bool = False,
+    confirm_token: str | None = None,
+) -> dict:
+    """Place a stop-market order (sell = stop-loss, buy = stop-buy).
+
+    MUTATING — REAL MONEY. There is no dry-run.
+
+    Workflow matches place_limit_order: confirmed=false → user consent →
+    confirmed=true + confirm_token with identical parameters.
+
+    Requires TR_MCP_TRADING_ENABLED=1 and a warm login session.
+    """
+    try:
+        require_trading_enabled()
+        validated = TickerInput(ticker=ticker)
+        client = get_client()
+        side = (order_type or "").strip().lower()
+        exch = (exchange or "LSX").strip().upper()
+        exp = (expiry or "gtc").strip().lower()
+        binding = _stop_order_binding(
+            validated.ticker, side, size, stop, exp, exch, expiry_date
+        )
+        if not confirmed:
+            name = await client.instrument_label(validated.ticker)
+            return confirmation_required(
+                "place_stop_market_order",
+                validated.ticker,
+                instrument_name=name,
+                binding=binding,
+                message=order_confirmation_message(
+                    action="place_stop_market_order",
+                    ticker=validated.ticker,
+                    instrument_name=name,
+                    order_type=side,
+                    size=size,
+                    stop=stop,
+                    expiry=exp,
+                    exchange=exch,
+                ),
+            )
+        require_confirmation(
+            "place_stop_market_order",
+            validated.ticker,
+            confirm_token,
+            binding=binding,
+        )
+        return await client.place_stop_market_order(
+            validated.ticker,
+            side,
+            size,
+            stop,
+            expiry=exp,
+            exchange=exch,
+            expiry_date=expiry_date,
+        )
+    except Exception as exc:
+        raise_structured(exc)
+
+
+@mcp.tool()
+@log_tool_call("cancel_order")
+async def cancel_order(
+    order_id: str,
+    confirmed: bool = False,
+    confirm_token: str | None = None,
+) -> dict:
+    """Cancel an open Trade Republic order by id.
+
+    MUTATING — REAL MONEY. There is no dry-run.
+
+    Workflow:
+    1. Call with confirmed=false → confirmation_required + confirm_token bound to order_id.
+    2. After user consent, retry with confirmed=true and that confirm_token.
+
+    Requires TR_MCP_TRADING_ENABLED=1 and a warm login session.
+    """
+    try:
+        require_trading_enabled()
+        cleaned = (order_id or "").strip()
+        if not cleaned:
+            raise ValueError("order_id is required")
+        binding = {"order_id": cleaned}
+        # Subject key for the store: use order_id as ticker slot.
+        subject = cleaned
+        if not confirmed:
+            return confirmation_required(
+                "cancel_order",
+                subject,
+                binding=binding,
+                message=order_confirmation_message(
+                    action="cancel_order",
+                    ticker=subject,
+                    order_id=cleaned,
+                ),
+            )
+        require_confirmation("cancel_order", subject, confirm_token, binding=binding)
+        return await get_client().cancel_order(cleaned)
     except Exception as exc:
         raise_structured(exc)
 

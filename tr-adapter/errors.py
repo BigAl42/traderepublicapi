@@ -5,7 +5,11 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from mcp_write import ConfirmationError, WriteToolsDisabledError
+from mcp_write import (
+    ConfirmationError,
+    TradingToolsDisabledError,
+    WriteToolsDisabledError,
+)
 from redact import redact_secrets
 from session import ErrorKind
 from tr_client import TradeRepublicClientError
@@ -23,6 +27,18 @@ def error_payload(exc: BaseException) -> dict[str, Any]:
             "guidance": (
                 "Set TR_MCP_WRITE_ENABLED=1 only when watchlist mutations are intended. "
                 "Default production is writes off."
+            ),
+        }
+    if isinstance(exc, TradingToolsDisabledError):
+        return {
+            "status": "error",
+            "code": "trading_disabled",
+            "message": redact_secrets(str(exc)),
+            "retryable": False,
+            "retry_after_seconds": None,
+            "guidance": (
+                "Set TR_MCP_TRADING_ENABLED=1 only when real-money orders are intended. "
+                "There is no dry-run. Default production is trading off."
             ),
         }
     if isinstance(exc, ConfirmationError):

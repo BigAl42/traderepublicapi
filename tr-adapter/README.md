@@ -1,13 +1,14 @@
 # Trade Republic MCP adapter (Hermes)
 
-Read-first MCP server over the unofficial Trade Republic API. Mutating tools are
-limited to watchlist add/remove and are **off by default**.
+Read-first MCP server over the unofficial Trade Republic API. Watchlist writes and
+trading tools are **off by default** (`TR_MCP_WRITE_ENABLED`, `TR_MCP_TRADING_ENABLED`).
 
 ## Production defaults
 
 ```bash
 TR_MCP_ALLOW_INTERACTIVE_LOGIN=0
 TR_MCP_WRITE_ENABLED=0
+TR_MCP_TRADING_ENABLED=0
 # Provide TR_TOKEN and/or a warm cookie file:
 # TR_COOKIES_FILE=tr_cookies.txt
 ```
@@ -68,6 +69,18 @@ After mutate, the adapter re-fetches the watchlist:
 | `completed` + `verified=true` | Membership matches intent |
 | `uncertain` / verify failed | Wait `retry_after_seconds` (default 60); call `get_watchlist` / `get_adapter_status`; do not immediately mutate again |
 
+## Trading (real money, confirm_token)
+
+Requires `TR_MCP_TRADING_ENABLED=1`. **No dry-run.**
+
+Tools: `place_limit_order`, `place_stop_market_order` (sell = stop-loss), `cancel_order`.
+
+Same confirm flow as watchlist, but the token is bound to side/size/limit-or-stop/expiry/exchange
+(or `order_id` for cancel). Changing parameters between preview and execute invalidates the token.
+
+Prefer `get_order_preview` / `get_instrument_suitability` before placing. After mutate, verify via
+`list_open_orders`; on `uncertain` wait backoff and do not immediately retry.
+
 ## Run
 
 ```bash
@@ -77,5 +90,3 @@ python3 mcp_server.py
 # Or directly
 python3 tr-adapter/mcp_server.py
 ```
-
-Offline tests: `make test`
