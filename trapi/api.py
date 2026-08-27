@@ -92,6 +92,32 @@ class TRApi:
 
         self.latest_response = {}
 
+    def load_cookies_from_disk(self) -> bool:
+        """Reload Mozilla cookie jar from disk (e.g. after offline check_login)."""
+        if not self.cookies_file.is_file():
+            return False
+        jar = MozillaCookieJar(str(self.cookies_file))
+        try:
+            jar.load(ignore_discard=True, ignore_expires=True)
+        except (OSError, ValueError):
+            return False
+        self.session.cookies = jar
+        cookie = next(
+            (c.value for c in self.session.cookies if c.name == "tr_session"),
+            None,
+        )
+        if cookie:
+            self.sessionToken = cookie
+            return True
+        return False
+
+    def session_needs_refresh(self, *, skew_seconds: float = 45.0) -> bool:
+        """True when a soft web-session refresh should run before the next query."""
+        expires = float(getattr(self, "_session_expires_at", 0) or 0)
+        if expires <= 0:
+            return False
+        return time.time() >= (expires - skew_seconds)
+
     def _stable_device_id(self):
         seed = "|".join(
             [str(uuid.getnode()), platform.node(), platform.machine(), platform.system()]
@@ -190,6 +216,27 @@ class TRApi:
     def _has_tr_session_cookie(self):
         return any(c.name == "tr_session" for c in self.session.cookies)
 
+    def clear_tr_session_cookie(self) -> None:
+        """Drop in-memory tr_session so WebSocket can reconnect anonymously.
+
+        Expired cookies are otherwise attached to every ``wss://`` connect and
+        cause HTTP 401 even for public subscriptions (charts, search, news).
+        Does not delete the cookie file on disk.
+        """
+        try:
+            self.session.cookies.clear(domain=".traderepublic.com", path="/", name="tr_session")
+        except (KeyError, TypeError, AttributeError):
+            expired = [c for c in list(self.session.cookies) if c.name == "tr_session"]
+            for cookie in expired:
+                try:
+                    self.session.cookies.clear(
+                        domain=cookie.domain, path=cookie.path, name=cookie.name
+                    )
+                except (KeyError, TypeError, AttributeError):
+                    pass
+        self.sessionToken = None
+        self._session_expires_at = 0
+
     def _resume_web_session(self):
         """Resume using cookie jar and/or already-injected in-memory tr_session.
 
@@ -200,19 +247,7 @@ class TRApi:
             return False
         data = self.refresh_account_settings()
         if data is None:
-            # Drop only the session cookie — keep other jar state for diagnostics.
-            try:
-                self.session.cookies.clear(domain=".traderepublic.com", path="/", name="tr_session")
-            except (KeyError, TypeError, AttributeError):
-                expired = [c for c in list(self.session.cookies) if c.name == "tr_session"]
-                for cookie in expired:
-                    try:
-                        self.session.cookies.clear(
-                            domain=cookie.domain, path=cookie.path, name=cookie.name
-                        )
-                    except (KeyError, TypeError, AttributeError):
-                        pass
-            self.sessionToken = None
+            self.clear_tr_session_cookie()
             return False
         cookie = next(
             (c.value for c in self.session.cookies if c.name == "tr_session"),
@@ -236,24 +271,17 @@ class TRApi:
                 pass
 
     def reset_transport_sync(self):
-        """Best-effort sync reset when no event loop is available."""
+        """Best-effort sync reset when no awaitable context is available.
+
+        Must not call ``run_until_complete`` / ``asyncio.run`` and must not
+        ``create_task`` on a foreign/running loop — that races reconnects and
+        surfaces as ``RuntimeError: This event loop is already running`` under
+        FastMCP. Async callers must use ``await reset_transport()`` instead.
+        """
         self.started = False
         self.callbacks = {}
         self.latest_response = {}
-        ws = self.ws
         self.ws = None
-        if ws is not None:
-            try:
-                close = getattr(ws, "close", None)
-                if close is not None:
-                    # websockets close is async; schedule if loop running, else ignore.
-                    try:
-                        loop = asyncio.get_running_loop()
-                        loop.create_task(ws.close())
-                    except RuntimeError:
-                        pass
-            except Exception:
-                pass
 
     def register_new_device(self, processId=None):
         self.signing_key = SigningKey.generate(curve=NIST256p, hashfunc=hashlib.sha512)
@@ -363,11 +391,11 @@ class TRApi:
         )
         self._raise_login_error(r)
 
-    def _login_web(self, **kwargs):
-        if kwargs.get("resume", True) and self._resume_web_session():
-            print("Resumed saved Trade Republic web session.")
-            return True
+    def start_web_login(self) -> dict:
+        """Start web login (push / authenticator). Does not wait for confirmation.
 
+        Returns a dict with process_id, status, required_action, and raw process.
+        """
         r = self.session.post(
             f"{self.url}/api/v2/auth/web/login",
             json={"phoneNumber": self.number, "pin": self.pin},
@@ -380,27 +408,71 @@ class TRApi:
         if not self._process_id:
             raise TRapiException(f"Web login did not return processId: {data}")
 
-        try:
-            self._required_action = self._weblogin_process().get("requiredAction")
-        except TRapiException:
-            self._required_action = None
+        process = self._weblogin_process()
+        self._required_action = process.get("requiredAction")
+        return {
+            "process_id": self._process_id,
+            "status": process.get("status"),
+            "required_action": self._required_action,
+            "expires_at": process.get("expiresAt"),
+            "process": process,
+        }
 
-        if self._required_action == "AUTHENTICATOR_VERIFICATION":
-            code = kwargs.get("authenticator_code") or os.environ.get("TR_AUTHENTICATOR_CODE")
-            if not code:
-                code = input("Authenticator code: ")
-            self._complete_authenticator(code)
-        else:
-            self._await_web_confirmation(timeout=kwargs.get("login_timeout", 120))
+    def poll_web_login(self) -> dict:
+        """Poll an in-flight web login process started by start_web_login()."""
+        if not self._process_id:
+            raise TRapiException("No web login process in progress.")
+        process = self._weblogin_process()
+        self._required_action = process.get("requiredAction") or self._required_action
+        return {
+            "process_id": self._process_id,
+            "status": process.get("status"),
+            "required_action": self._required_action,
+            "expires_at": process.get("expiresAt"),
+            "process": process,
+        }
 
+    def complete_web_login_authenticator(self, code: str) -> dict:
+        """Submit authenticator code for a pending web login process."""
+        if not code or not str(code).strip():
+            raise TRapiException("Authenticator code is required.")
+        self._complete_authenticator(str(code).strip())
+        return self.poll_web_login()
+
+    def finalize_web_login(self) -> bool:
+        """Persist cookies after the login process is CONFIRMED/COMPLETED."""
+        if not self._process_id:
+            raise TRapiException("No web login process in progress.")
         self._save_cookies()
         self._refresh_web_session()
-        self.refresh_account_settings()
+        data = self.refresh_account_settings()
+        if data is None:
+            return False
         cookie = next(
             (c.value for c in self.session.cookies if c.name == "tr_session"),
             None,
         )
         self.sessionToken = cookie
+        self._process_id = None
+        self._required_action = None
+        return bool(cookie)
+
+    def _login_web(self, **kwargs):
+        if kwargs.get("resume", True) and self._resume_web_session():
+            print("Resumed saved Trade Republic web session.")
+            return True
+
+        started = self.start_web_login()
+        if started.get("required_action") == "AUTHENTICATOR_VERIFICATION":
+            code = kwargs.get("authenticator_code") or os.environ.get("TR_AUTHENTICATOR_CODE")
+            if not code:
+                code = input("Authenticator code: ")
+            self.complete_web_login_authenticator(code)
+        else:
+            self._await_web_confirmation(timeout=kwargs.get("login_timeout", 120))
+
+        if not self.finalize_web_login():
+            raise TRapiException("Web login finished but session cookies were not established.")
         return True
 
     def login(self, **kwargs):
@@ -1297,6 +1369,15 @@ class TRApi:
             key=f"timelineDetailV2 {id}",
         )
 
+    async def timeline_detail_order(self, order_id, callback=print):
+        """timelineDetail request keyed by orderId (order ticket / execution detail)."""
+        return await self.sub(
+            "timelineDetail",
+            callback=callback,
+            payload={"type": "timelineDetail", "orderId": order_id},
+            key=f"timelineDetail order {order_id}",
+        )
+
     async def subscribe_news(self, isin, callback=print):
         """subscribeNews request"""
         return await self.sub(
@@ -1492,6 +1573,16 @@ class TrBlockingApi(TRApi):
         super().__init__(number, pin, locale, key_file=key_file, auth=auth, cookies_file=cookies_file)
 
     def _run(self, coro):
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is not None and loop.is_running():
+            raise RuntimeError(
+                "TrBlockingApi cannot run inside an active asyncio event loop "
+                "(e.g. FastMCP / Hermes). Use async TRApi with await, not "
+                "TrBlockingApi sync wrappers."
+            )
         return asyncio.get_event_loop().run_until_complete(self.get_one(coro))
 
     async def get_one(self, f):
@@ -1509,87 +1600,77 @@ class TrBlockingApi(TRApi):
     # -----------------------------------------------------------
 
     def aggregate_history_light(self, isin, range="max", resolution=604800000, exchange="LSX"):
-        return asyncio.get_event_loop().run_until_complete(
-            self.get_one(super().aggregate_history_light(isin, range=range, resolution=resolution, exchange=exchange))
+        return self._run(
+            super().aggregate_history_light(
+                isin, range=range, resolution=resolution, exchange=exchange
+            )
         )
 
     def available_cash(self):
-        return asyncio.get_event_loop().run_until_complete(
-            self.get_one(super().available_cash())
-        )
+        return self._run(super().available_cash())
 
     def available_cash_for_payout(self):
-        return asyncio.get_event_loop().run_until_complete(
-            self.get_one(super().available_cash_for_payout())
-        )
+        return self._run(super().available_cash_for_payout())
 
     def cash(self):
-        return asyncio.get_event_loop().run_until_complete(self.get_one(super().cash()))
+        return self._run(super().cash())
 
     def instrument(self, id):
-        return asyncio.get_event_loop().run_until_complete(
-            self.get_one(super().instrument(id))
-        )
+        return self._run(super().instrument(id))
 
-    def neon_search(self, query="", page=1, page_size=20, instrument_type="stock", jurisdiction="DE", ):
-        return asyncio.get_event_loop().run_until_complete(
-            self.get_one(
-                super().neon_search(query=query, page=page, page_size=page_size, instrument_type=instrument_type,
-                                    jurisdiction=jurisdiction))
+    def neon_search(
+        self,
+        query="",
+        page=1,
+        page_size=20,
+        instrument_type="stock",
+        jurisdiction="DE",
+    ):
+        return self._run(
+            super().neon_search(
+                query=query,
+                page=page,
+                page_size=page_size,
+                instrument_type=instrument_type,
+                jurisdiction=jurisdiction,
+            )
         )
 
     def neon_news(self, isin):
-        return asyncio.get_event_loop().run_until_complete(
-            self.get_one(super().neon_news(isin))
-        )
+        return self._run(super().neon_news(isin))
 
     def neon_search_tags(self):
         return self._run(super().neon_search_tags())
 
-    def orders(self):
-        return asyncio.get_event_loop().run_until_complete(
-            self.get_one(super().orders())
-        )
+    def orders(self, terminated=False):
+        return self._run(super().orders(terminated=terminated))
+
+    def timeline_detail_order(self, order_id):
+        return self._run(super().timeline_detail_order(order_id))
 
     def portfolio(self):
-        return asyncio.get_event_loop().run_until_complete(
-            self.get_one(super().portfolio())
-        )
+        return self._run(super().portfolio())
 
     def portfolio_aggregate_history(self, range="max"):
-        return asyncio.get_event_loop().run_until_complete(
-            self.get_one(super().portfolio_aggregate_history(range=range))
-        )
+        return self._run(super().portfolio_aggregate_history(range=range))
 
     def stock_detail_dividends(self, isin):
-        return asyncio.get_event_loop().run_until_complete(
-            self.get_one(super().stock_detail_dividends(isin))
-        )
+        return self._run(super().stock_detail_dividends(isin))
 
     def stock_detail_kpis(self, isin):
-        return asyncio.get_event_loop().run_until_complete(
-            self.get_one(super().stock_detail_kpis(isin))
-        )
+        return self._run(super().stock_detail_kpis(isin))
 
     def stock_details(self, isin):
-        return asyncio.get_event_loop().run_until_complete(
-            self.get_one(super().stock_details(isin))
-        )
+        return self._run(super().stock_details(isin))
 
     def ticker(self, isin, exchange="LSX"):
-        return asyncio.get_event_loop().run_until_complete(
-            self.get_one(super().ticker(isin, exchange))
-        )
+        return self._run(super().ticker(isin, exchange))
 
     def timeline(self, after=None):
-        return asyncio.get_event_loop().run_until_complete(
-            self.get_one(super().timeline(after=after))
-        )
+        return self._run(super().timeline(after=after))
 
     def timeline_detail(self, id):
-        return asyncio.get_event_loop().run_until_complete(
-            self.get_one(super().timeline_detail(id=id))
-        )
+        return self._run(super().timeline_detail(id=id))
 
     def account_pairs(self):
         return self._run(super().account_pairs())

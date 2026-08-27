@@ -106,6 +106,16 @@ def _mock_client() -> MagicMock:
         "count": 1,
         "orders": [{"id": "ord-1", "isin": "US0378331005"}],
     })
+    mock.list_order_history = AsyncMock(return_value={
+        "count": 1,
+        "orders": [{"order_id": "ord-1", "ticker": "US0378331005"}],
+    })
+    mock.get_order = AsyncMock(return_value={
+        "order_id": "ord-1",
+        "found_in": "open",
+        "order": {"order_id": "ord-1", "ticker": "US0378331005"},
+        "detail": None,
+    })
     mock.list_savings_plans = AsyncMock(return_value={
         "count": 1,
         "savings_plans": [{"id": "sp-1", "isin": "IE00B4L5Y983"}],
@@ -238,7 +248,9 @@ class RootMcpServerTest(unittest.IsolatedAsyncioTestCase):
         mock = _mock_client()
         mcp_server = _patch_client(mock)
         await mcp_server.mcp.call_tool("list_open_orders", {"include_terminated": True})
-        mock.list_open_orders.assert_awaited_once_with(include_terminated=True)
+        mock.list_open_orders.assert_awaited_once_with(
+            include_terminated=True, ticker=None
+        )
 
     async def test_list_savings_plans(self):
         mock = _mock_client()

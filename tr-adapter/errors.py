@@ -64,8 +64,17 @@ def error_payload(exc: BaseException) -> dict[str, Any]:
             )
         elif kind_value == ErrorKind.LOGIN_REQUIRED.value:
             guidance = (
-                "No warm session. Warm cookies offline with check_login.py or set TR_TOKEN. "
-                "Keep TR_MCP_ALLOW_INTERACTIVE_LOGIN=0 in production."
+                "Trade Republic session is cold. Soft auto-renew already ran. "
+                "Call renew_session next — if status is awaiting_push_confirm, ask the "
+                "user to confirm the Trade Republic app push, then call renew_session "
+                "again. Do NOT switch to ClawStreet or invent browser cookie scraping. "
+                "Retry the same account tool once session is ready."
+            )
+        elif kind_value == ErrorKind.SESSION_EXPIRED.value:
+            guidance = (
+                "Session expired mid-call. Retry the same MCP tool once (soft auto-renew). "
+                "If it fails, call renew_session (app push confirm if asked). "
+                "Do not change data providers."
             )
         elif exc.retryable:
             guidance = (

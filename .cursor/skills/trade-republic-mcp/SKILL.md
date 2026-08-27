@@ -18,9 +18,11 @@ Ausführliche Deploy-/Ops-Doku: [tr-adapter/HERMES.md](../../../tr-adapter/HERME
 
 1. Bei Fehlern zuerst `get_adapter_status` (lokal, kein TR-Call).
 2. JSON-Fehler parsen: `code`, `retry_after_seconds`, `guidance` befolgen.
-3. Nie Push-Login triggern, wenn `TR_MCP_ALLOW_INTERACTIVE_LOGIN=0`.
-4. Bei `rate_limited` / Status `cooldown`: warten, keine TR-Calls, User informieren.
-5. Bei Status `write_backoff`: keine Mutationen; State mit Reads prüfen.
+3. Nie Push-Login aus Read-Loops triggern, wenn `TR_MCP_ALLOW_INTERACTIVE_LOGIN=0`.
+4. Bei `login_required` / `session_expired`: `renew_session` (App-Push bestätigen lassen),
+   dann denselben Read einmal retryen — nicht auf andere Provider wechseln.
+5. Bei `rate_limited` / Status `cooldown`: warten, keine TR-Calls, User informieren.
+6. Bei Status `write_backoff`: keine Mutationen; State mit Reads prüfen.
 
 ## Flags (Default: aus)
 
@@ -38,7 +40,8 @@ Portfolio / Konto:
 1. `get_adapter_status` (bei Fehlern / Unsicherheit)
 2. `get_account_summary`
 3. `list_active_positions` / `get_position_details`
-4. `list_open_orders` / `list_savings_plans` / `list_price_alarms`
+4. `list_open_orders` / `list_order_history` / `get_order` / `list_savings_plans` /
+   `list_price_alarms`
 5. `get_recent_transactions` oder `get_full_timeline` → `get_transaction_detail`
 
 Research / Pre-Trade:
@@ -91,7 +94,7 @@ Typische Defaults: Limit `expiry=gfd`, Stop-Loss `expiry=gtc`, Exchange `LSX`.
 
 | code / status | Aktion |
 |---------------|--------|
-| `login_required` | User: offline `check_login.py` / `TR_TOKEN`; keine Login-Schleife |
+| `login_required` / `session_expired` | `renew_session` (Push) oder offline `check_login.py` / `TR_TOKEN` |
 | `rate_limited` / `cooldown` | Warten `retry_after_seconds` |
 | `write_backoff` | Warten; Reads statt Mutates |
 | `writes_disabled` | Watchlist-Flag fehlt |

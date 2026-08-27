@@ -9,11 +9,17 @@ trading tools are **off by default** (`TR_MCP_WRITE_ENABLED`, `TR_MCP_TRADING_EN
 TR_MCP_ALLOW_INTERACTIVE_LOGIN=0
 TR_MCP_WRITE_ENABLED=0
 TR_MCP_TRADING_ENABLED=0
+TR_MCP_AUTO_RENEW=1   # default: soft cookie/token renew on 401 / near-expiry
 # Provide TR_TOKEN and/or a warm cookie file:
 # TR_COOKIES_FILE=tr_cookies.txt
+# Optional stable root when Hermes changes cwd between respawns:
+# TR_ADAPTER_DATA_DIR=/opt/data/home/traderepublicapi/tr-adapter
 ```
 
-Warm the session **offline** (not from Hermes tool loops):
+On cold/401 sessions the adapter soft-renews itself (disk cookies → `TR_TOKEN`).
+If cookies are fully dead, call MCP tool `renew_session` (app push with
+`TR_PHONE`/`TR_PIN`) — agents must **not** switch to other market-data providers.
+Offline alternative:
 
 ```bash
 python3 check_login.py
@@ -23,7 +29,7 @@ python3 check_login.py
 After deploy, verify MCP plumbing (no account):
 
 ```bash
-python3 smoke_mcp.py --stdio
+python3 smoke_mcp.py
 ```
 
 Hermes agent rules and deploy checklist: [HERMES.md](HERMES.md).

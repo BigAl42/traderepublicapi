@@ -16,6 +16,7 @@ if str(ADAPTER_DIR) not in sys.path:
 from mcp_write import (  # noqa: E402
     ConfirmationError,
     ConfirmationStore,
+    _confirm_store_path,
     confirmation_required,
     normalize_binding,
     order_confirmation_message,
@@ -39,6 +40,54 @@ class WriteEnabledTest(unittest.TestCase):
             self.assertTrue(write_enabled())
         with patch.dict(os.environ, {"TR_MCP_TRADING_ENABLED": "1"}):
             self.assertTrue(trading_enabled())
+
+
+class ConfirmStorePathTest(unittest.TestCase):
+    def test_override_resolves_absolute(self):
+        import os
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = str(Path(tmp) / "confirmations.json")
+            with patch.dict(os.environ, {"TR_MCP_CONFIRM_STORE": store}):
+                path = _confirm_store_path()
+                self.assertTrue(path.is_absolute())
+                self.assertEqual(path, Path(store).resolve())
+
+    def test_default_next_to_cookies_under_data_dir(self):
+        import os
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {
+                "TR_ADAPTER_DATA_DIR": tmp,
+                "TR_COOKIES_FILE": "tr_cookies.txt",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                os.environ.pop("TR_MCP_CONFIRM_STORE", None)
+                path = _confirm_store_path()
+                self.assertEqual(
+                    path,
+                    Path(tmp).resolve() / "tr_cookies.txt.confirmations.json",
+                )
+
+    def test_relative_confirm_store_uses_data_dir(self):
+        import os
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(
+                os.environ,
+                {
+                    "TR_ADAPTER_DATA_DIR": tmp,
+                    "TR_MCP_CONFIRM_STORE": "local.confirmations.json",
+                },
+            ):
+                path = _confirm_store_path()
+                self.assertEqual(
+                    path,
+                    Path(tmp).resolve() / "local.confirmations.json",
+                )
 
 
 class ConfirmationStoreTest(unittest.TestCase):

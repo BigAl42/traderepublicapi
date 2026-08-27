@@ -17,6 +17,7 @@ ADAPTER_DIR = Path(__file__).resolve().parent
 EXPECTED_MCP_TOOLS: frozenset[str] = frozenset(
     {
         "get_adapter_status",
+        "renew_session",
         "get_account_summary",
         "list_active_positions",
         "get_position_details",
@@ -35,6 +36,8 @@ EXPECTED_MCP_TOOLS: frozenset[str] = frozenset(
         "get_full_timeline",
         "get_transaction_detail",
         "list_open_orders",
+        "list_order_history",
+        "get_order",
         "list_savings_plans",
         "list_price_alarms",
         "get_live_quote",
@@ -189,7 +192,7 @@ async def run_live_smoke() -> None:
 
     print("[live] get_balance_info …")
     try:
-        client._ensure_session()
+        await client._ensure_session()
         summary = await client.get_balance_info()
         cash = (summary.get("summary") or {}).get("total_cash")
         print(f"[live] get_balance_info OK — cash={cash}")
